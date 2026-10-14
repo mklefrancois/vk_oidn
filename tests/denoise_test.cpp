@@ -204,6 +204,21 @@ struct App
     for (const char* e : extensions)
       hasCoopMat |= strcmp(e, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) == 0;
 
+    // EXPERIMENTAL: NVIDIA cooperative matrices 2 (used by vk_oidn with VK_OIDN_CM2=1)
+    uint32_t numExts = 0;
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &numExts, nullptr);
+    std::vector<VkExtensionProperties> extProps(numExts);
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &numExts, extProps.data());
+    bool hasCoopMat2 = false;
+    for (const auto& e : extProps)
+      hasCoopMat2 |= hasCoopMat && strcmp(e.extensionName, VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME) == 0;
+    if (hasCoopMat2)
+      extensions.push_back(VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME);
+    VkPhysicalDeviceCooperativeMatrix2FeaturesNV coopMat2Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV};
+    coopMat2Features.cooperativeMatrixWorkgroupScope = VK_TRUE;
+    coopMat2Features.cooperativeMatrixFlexibleDimensions = VK_TRUE;
+    coopMat2Features.cooperativeMatrixTensorAddressing = VK_TRUE;
+
     VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     VkPhysicalDeviceVulkan11Features features11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
     VkPhysicalDeviceVulkan12Features features12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
@@ -213,6 +228,7 @@ struct App
     features11.pNext = &features12;
     features12.pNext = &features13;
     features13.pNext = hasCoopMat ? &coopMatFeatures : nullptr;
+    coopMatFeatures.pNext = hasCoopMat2 ? &coopMat2Features : nullptr;
     vkoidn::enableRequiredFeatures(features, features11, features12, features13,
                                    hasCoopMat ? &coopMatFeatures : nullptr);
     features12.hostQueryReset = VK_TRUE;

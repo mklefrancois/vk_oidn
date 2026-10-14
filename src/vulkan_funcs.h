@@ -39,7 +39,12 @@ namespace vkoidn {
     F(vkCmdPushConstants)                                \
     F(vkCmdDispatch)                                     \
     F(vkCmdPipelineBarrier)                              \
-    F(vkCmdCopyBuffer)
+    F(vkCmdCopyBuffer)                                   \
+    F(vkCreateQueryPool)                                 \
+    F(vkDestroyQueryPool)                                \
+    F(vkCmdResetQueryPool)                               \
+    F(vkCmdWriteTimestamp)                               \
+    F(vkGetQueryPoolResults)
 
   #define VKOIDN_DECLARE_FUNC(name) PFN_##name name = nullptr;
 

@@ -36,7 +36,10 @@ namespace vkoidn {
     const VulkanFuncs& getFuncs() const { return fn; }
     VkDevice getDevice() const { return device; }
     bool hasCoopMatAccF16() const { return coopMatAccF16; }
+    bool useCoopMat2() const { return coopMat2; } // experimental
     uint32_t getSubgroupSize() const { return subgroupSize; }
+    float getTimestampPeriod() const { return timestampPeriod; }
+    const VkAllocationCallbacks* getAllocator() const { return allocator; }
 
     // Memory
     Result createBuffer(VkDeviceSize byteSize, bool hostVisible, GpuBuffer& buffer);
@@ -84,9 +87,11 @@ namespace vkoidn {
     // Capabilities
     bool coopMat = false;
     bool coopMatAccF16 = false;
+    bool coopMat2 = false;
     bool floatControls16 = false;
     bool subgroupSizeControl = false;
     uint32_t subgroupSize = 32;
+    float timestampPeriod = 1.f;
 
     std::mutex pipelineMutex;
     std::unordered_map<std::string, VkPipeline> pipelines;

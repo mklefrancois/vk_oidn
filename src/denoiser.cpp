@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace vkoidn {
@@ -110,6 +112,12 @@ namespace vkoidn {
       int tileW = 0, tileH = 0;    // kernel workgroup tile
       int numFrags = 1;            // output blocks per workgroup (cooperative matrices)
       VkPipeline pipeline = VK_NULL_HANDLE;
+
+      // Experimental VK_NV_cooperative_matrix2 kernel
+      bool cm2 = false;
+      int cm2BN = 0;               // output channels per workgroup
+      uint64_t cm2WeightOffset = 0; // [tap][K][N] f16 weights in cm2Buffer
+      uint64_t cm2BiasOffset = 0;   // [N] f32 bias in cm2Buffer
     };
 
     // Computes the tensor shapes and the scratch memory plan for the current tile size
@@ -159,6 +167,20 @@ namespace vkoidn {
     GpuBuffer stagingBuffer; // weights upload
     GpuBuffer scratchBuffer; // tensors
     GpuBuffer aeBuffer;      // autoexposure bins, partial sums and result
+    GpuBuffer cm2Buffer;     // weights for the experimental coopmat2 kernel
+    GpuBuffer cm2Staging;
+
+    // Profiling (VK_OIDN_PROFILE=1): GPU time of each dispatch of the first tile, averaged over
+    // the executions and printed when the denoiser is destroyed
+    void cmdProfile(VkCommandBuffer cmd, uint32_t query);
+    void collectProfile();
+    VkQueryPool queryPool = VK_NULL_HANDLE;
+    uint32_t numQueries = 0;
+    bool profilePending = false;
+    bool profiling = false; // recording the first tile
+    std::vector<std::string> profileNames;
+    std::vector<double> profileTimes; // accumulated msec per entry
+    int profileCount = 0;
   };
 
   Result Denoiser::create(Context& context, VkCommandBuffer cmd, const DenoiserCreateInfo& createInfo,
@@ -174,15 +196,33 @@ namespace vkoidn {
 
   DenoiserImpl::~DenoiserImpl()
   {
+    if (queryPool)
+    {
+      collectProfile();
+      if (profileCount > 0)
+      {
+        double total = 0;
+        printf("vk_oidn profile (%s, %dx%d, %d run(s), first tile):\n", weightsName.c_str(), tileW, tileH, profileCount);
+        for (size_t i = 0; i < profileNames.size(); ++i)
+        {
+          printf("  %-14s %8.3f ms\n", profileNames[i].c_str(), profileTimes[i] / profileCount);
+          total += profileTimes[i] / profileCount;
+        }
+        printf("  %-14s %8.3f ms\n", "total", total);
+      }
+      ctx.getFuncs().vkDestroyQueryPool(ctx.getDevice(), queryPool, ctx.getAllocator());
+    }
     ctx.destroyBuffer(weightBuffer);
     ctx.destroyBuffer(stagingBuffer);
     ctx.destroyBuffer(scratchBuffer);
     ctx.destroyBuffer(aeBuffer);
+    ctx.destroyBuffer(cm2Buffer);
+    ctx.destroyBuffer(cm2Staging);
   }
 
   uint64_t DenoiserImpl::getMemoryUsage() const
   {
-    return weightBuffer.byteSize + scratchBuffer.byteSize + aeBuffer.byteSize;
+    return weightBuffer.byteSize + scratchBuffer.byteSize + aeBuffer.byteSize + cm2Buffer.byteSize;
   }
 
   size_t DenoiserImpl::planMemory()
@@ -300,7 +340,30 @@ namespace vkoidn {
       const int numBlocks = int(layer.desc.outChannels / 16);
       const int numInputChannels = int(layer.desc.inChannels0 + layer.desc.inChannels1);
 
-      if (ctx.isCooperativeMatrixEnabled())
+      if (ctx.useCoopMat2() && !upsample && !pool && !accF16)
+      {
+        // EXPERIMENTAL: one workgroup-scope matrix per BM pixels of a row
+        const int N = numBlocks * 16;
+        const int numSplits = ceilDiv(N, 128);
+        const int BN = roundUp(ceilDiv(N, numSplits), 16);
+        const int BM = getenv("VK_OIDN_CM2_BM") ? atoi(getenv("VK_OIDN_CM2_BM")) : 64;
+        int BK = (layer.desc.inChannels0 % 32 == 0 && layer.desc.inChannels1 % 32 == 0) ? 32 : 16;
+        if (getenv("VK_OIDN_CM2_BK"))
+        {
+          const int requestedBK = atoi(getenv("VK_OIDN_CM2_BK"));
+          if (layer.desc.inChannels0 % requestedBK == 0 && layer.desc.inChannels1 % requestedBK == 0)
+            BK = requestedBK;
+        }
+        layer.cm2 = true;
+        layer.cm2BN = BN;
+        layer.tileW = BM;
+        layer.tileH = 1;
+        layer.numFrags = BN / 16;
+        if ((result = ctx.getPipeline("conv_cm2", {128, 0, 0, relu, uint32_t(BM), uint32_t(BN), uint32_t(BK)},
+                                      false, layer.pipeline)) != Result::Success)
+          return result;
+      }
+      else if (ctx.isCooperativeMatrixEnabled())
       {
         // Select the tile configuration (tuned on NVIDIA Blackwell):
         // - 1 output block per workgroup if the number of output blocks is odd (no wasted work)
@@ -460,6 +523,50 @@ namespace vkoidn {
         (result = ctx.createBuffer(weights.dataByteSize, true, stagingBuffer)) != Result::Success)
       return result;
 
+    // Repack the weights of the layers using the experimental coopmat2 kernel: [tap][K][N] f16
+    // weights and [N] f32 bias
+    {
+      std::vector<uint8_t> cm2Data;
+      for (Layer& layer : layers)
+      {
+        if (!layer.cm2)
+          continue;
+        const uint32_t K = layer.desc.inChannels0 + layer.desc.inChannels1;
+        const uint32_t N = layer.desc.outChannels;
+        const uint32_t NB = N / 16;
+        const uint8_t* data = static_cast<const uint8_t*>(weights.data);
+        const uint16_t* src = reinterpret_cast<const uint16_t*>(data + layer.desc.weightOffset);
+        const float* bias = reinterpret_cast<const float*>(data + layer.desc.biasF32Offset);
+
+        layer.cm2WeightOffset = roundUp(cm2Data.size(), memoryAlignment);
+        cm2Data.resize(layer.cm2WeightOffset + size_t(9) * K * N * 2);
+        uint16_t* dstW = reinterpret_cast<uint16_t*>(cm2Data.data() + layer.cm2WeightOffset);
+        for (uint32_t kc = 0; kc < K / 16; ++kc)
+          for (uint32_t tap = 0; tap < 9; ++tap)
+            for (uint32_t nb = 0; nb < NB; ++nb)
+              for (uint32_t ic = 0; ic < 16; ++ic)
+                for (uint32_t oc = 0; oc < 16; ++oc)
+                  dstW[(size_t(tap) * K + kc * 16 + ic) * N + nb * 16 + oc] =
+                    src[((size_t(kc) * 9 + tap) * NB + nb) * 256 + ic * 16 + oc];
+
+        layer.cm2BiasOffset = roundUp(cm2Data.size(), memoryAlignment);
+        cm2Data.resize(layer.cm2BiasOffset + size_t(N) * 4);
+        float* dstB = reinterpret_cast<float*>(cm2Data.data() + layer.cm2BiasOffset);
+        for (uint32_t n = 0; n < N; ++n)
+          dstB[n] = bias[(n / 16) * 256 + (n % 16)]; // first row of the replicated bias
+      }
+
+      if (!cm2Data.empty())
+      {
+        if ((result = ctx.createBuffer(cm2Data.size(), false, cm2Buffer)) != Result::Success ||
+            (result = ctx.createBuffer(cm2Data.size(), true, cm2Staging)) != Result::Success)
+          return result;
+        memcpy(cm2Staging.mapped, cm2Data.data(), cm2Data.size());
+        VkBufferCopy cm2Region{0, 0, cm2Data.size()};
+        ctx.getFuncs().vkCmdCopyBuffer(cmd, cm2Staging.buffer, cm2Buffer.buffer, 1, &cm2Region);
+      }
+    }
+
     // Record the upload of the weights
     memcpy(stagingBuffer.mapped, weights.data, weights.dataByteSize);
     const VulkanFuncs& fn = ctx.getFuncs();
@@ -472,12 +579,51 @@ namespace vkoidn {
     fn.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                             0, 1, &barrier, 0, nullptr, 0, nullptr);
 
+    // Profiling
+    if (getenv("VK_OIDN_PROFILE") && atoi(getenv("VK_OIDN_PROFILE")) > 0)
+    {
+      profileNames.push_back("input");
+      for (const Layer& layer : layers)
+        profileNames.push_back(layer.desc.name);
+      profileNames.push_back("output");
+      profileTimes.assign(profileNames.size(), 0.);
+      numQueries = uint32_t(profileNames.size()) * 2;
+
+      VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+      queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+      queryInfo.queryCount = numQueries;
+      if (fn.vkCreateQueryPool(ctx.getDevice(), &queryInfo, ctx.getAllocator(), &queryPool) != VK_SUCCESS)
+        queryPool = VK_NULL_HANDLE;
+    }
+
     // The packed weights are no longer needed on the host
     weightsBlob.clear();
     weightsBlob.shrink_to_fit();
     weights = Weights();
 
     return Result::Success;
+  }
+
+  void DenoiserImpl::cmdProfile(VkCommandBuffer cmd, uint32_t query)
+  {
+    if (profiling)
+      ctx.getFuncs().vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, query);
+  }
+
+  void DenoiserImpl::collectProfile()
+  {
+    if (!profilePending)
+      return;
+    std::vector<uint64_t> timestamps(numQueries);
+    if (ctx.getFuncs().vkGetQueryPoolResults(ctx.getDevice(), queryPool, 0, numQueries,
+                                             timestamps.size() * sizeof(uint64_t), timestamps.data(),
+                                             sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+      return; // not available yet
+
+    for (size_t i = 0; i < profileTimes.size(); ++i)
+      profileTimes[i] += double(timestamps[i * 2 + 1] - timestamps[i * 2]) * ctx.getTimestampPeriod() * 1e-6;
+    ++profileCount;
+    profilePending = false;
   }
 
   void DenoiserImpl::cmdAutoexposure(VkCommandBuffer cmd, const ImageParams& color, uint64_t resultAddress,
@@ -572,6 +718,18 @@ namespace vkoidn {
     // Previous executions may still access the internal resources
     ctx.cmdComputeBarrier(cmd);
 
+    if (queryPool)
+    {
+      // Profile one execution at a time: collect the results of the previous one if available
+      collectProfile();
+      if (!profilePending)
+      {
+        ctx.getFuncs().vkCmdResetQueryPool(cmd, queryPool, 0, numQueries);
+        profiling = true;
+        profilePending = true;
+      }
+    }
+
     // Input scale
     uint64_t inputScalePtr = 0;
     float inputScale = 1.f;
@@ -638,21 +796,30 @@ namespace vkoidn {
         in.tileW = tileW1;
         in.inputScale = inputScale;
         in.normScale = normScale;
+        cmdProfile(cmd, 0);
         if (useViews)
           ctx.cmdPushImageViews(cmd, views);
         ctx.cmdDispatch(cmd, useViews ? inputImagePipeline : inputPipeline, in,
                         ceilDiv(uint32_t(inputTensor.W), elementwiseGroupSizeX),
                         ceilDiv(uint32_t(inputTensor.H), elementwiseGroupSizeY), 1, useViews);
+        cmdProfile(cmd, 1);
 
         // Convolutions
-        for (const Layer& layer : layers)
+        for (size_t l = 0; l < layers.size(); ++l)
         {
+          const Layer& layer = layers[l];
+          cmdProfile(cmd, uint32_t(l + 1) * 2);
           const Tensor& src0 = tensors[layer.src0];
           ConvParams conv{};
           conv.src0 = scratch + src0.offset;
           conv.src1 = (layer.src1 >= 0) ? scratch + tensors[layer.src1].offset : 0;
           conv.weight = weightBuffer.address + layer.desc.weightOffset;
           conv.bias = weightBuffer.address + (accF16 ? layer.desc.biasF16Offset : layer.desc.biasF32Offset);
+          if (layer.cm2)
+          {
+            conv.weight = cm2Buffer.address + layer.cm2WeightOffset;
+            conv.bias = cm2Buffer.address + layer.cm2BiasOffset;
+          }
           conv.dst = scratch + tensors[layer.dst].offset;
           conv.H = layer.convH;
           conv.W = layer.convW;
@@ -663,6 +830,7 @@ namespace vkoidn {
                           ceilDiv(uint32_t(layer.convW), uint32_t(layer.tileW)),
                           ceilDiv(uint32_t(layer.convH), uint32_t(layer.tileH)),
                           ceilDiv(uint32_t(conv.NB), uint32_t(layer.numFrags)));
+          cmdProfile(cmd, uint32_t(l + 1) * 2 + 1);
         }
 
         // Output processing
@@ -683,11 +851,14 @@ namespace vkoidn {
         out.flags = flags | (useViews && isHalfFormat(inputs.outputView.format) ? 64u : 0u);
         out.outputScale = outputScale;
         out.rcpNormScale = rcpNormScale;
+        cmdProfile(cmd, numQueries - 2);
         if (useViews)
           ctx.cmdPushImageViews(cmd, views);
         ctx.cmdDispatch(cmd, useViews ? outputImagePipeline : outputPipeline, out,
                         ceilDiv(uint32_t(tileW2), elementwiseGroupSizeX),
                         ceilDiv(uint32_t(tileH2), elementwiseGroupSizeY), 1, useViews);
+        cmdProfile(cmd, numQueries - 1);
+        profiling = false; // only the first tile is profiled
       }
     }
 

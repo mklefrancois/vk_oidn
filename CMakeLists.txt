@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Vulkan headers (the loader is not linked: the application provides vkGet*ProcAddr)
-find_package(Vulkan REQUIRED)
+find_package(Vulkan REQUIRED OPTIONAL_COMPONENTS glslangValidator)
 
 # Slang compiler for the shaders (from the Vulkan SDK by default)
 find_program(VK_OIDN_SLANGC slangc
@@ -99,6 +99,31 @@ foreach(kernel ${VK_OIDN_KERNELS})
   )
   list(APPEND VK_OIDN_SPV_FILES ${spv} ${spv_nofc})
 endforeach()
+
+# Experimental kernels written in GLSL (VK_NV_cooperative_matrix2), compiled with glslang
+if(Vulkan_GLSLANG_VALIDATOR_EXECUTABLE)
+  set(cm2_src ${CMAKE_CURRENT_SOURCE_DIR}/shaders/experimental/conv_cm2.comp)
+  foreach(variant "conv_cm2|" "conv_cm2_nofc|-DOIDN_NO_FLOAT_CONTROLS")
+    string(REPLACE "|" ";" variant_parts "${variant}")
+    list(GET variant_parts 0 kernel_name)
+    list(LENGTH variant_parts num_parts)
+    set(define_args)
+    if(num_parts GREATER 1)
+      list(GET variant_parts 1 define_args)
+    endif()
+    set(spv ${VK_OIDN_SPV_DIR}/${kernel_name}.spv)
+    add_custom_command(
+      OUTPUT ${spv}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${VK_OIDN_SPV_DIR}
+      COMMAND ${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE} -V --target-env vulkan1.3 --quiet ${define_args} -o ${spv} ${cm2_src}
+      DEPENDS ${cm2_src}
+      COMMENT "vk_oidn: compiling experimental kernel ${kernel_name}"
+      VERBATIM
+    )
+    list(APPEND VK_OIDN_SPV_FILES ${spv})
+  endforeach()
+  target_sources(vk_oidn PRIVATE ${cm2_src})
+endif()
 
 set(VK_OIDN_KERNELS_CPP ${CMAKE_CURRENT_BINARY_DIR}/generated/kernels_embedded.cpp)
 add_custom_command(

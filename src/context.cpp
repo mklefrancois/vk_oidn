@@ -74,6 +74,7 @@ namespace vkoidn {
     if (props.apiVersion < VK_API_VERSION_1_2 || props.limits.maxPushConstantsSize < maxParamsByteSize)
       return Result::ErrorUnsupportedDevice;
     deviceName = props.deviceName;
+    timestampPeriod = props.limits.timestampPeriod;
     const bool isVulkan13 = props.apiVersion >= VK_API_VERSION_1_3;
 
     VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -128,6 +129,12 @@ namespace vkoidn {
       coopMat = accF32 && (coopMatOption > 0 || (coopMatOption < 0 && isNVIDIA));
       coopMatAccF16 = coopMat && accF16;
     }
+
+    // EXPERIMENTAL: VK_NV_cooperative_matrix2 convolutions (VK_OIDN_CM2=1); the application must
+    // enable the extension with the workgroup scope, flexible dimensions and tensor addressing
+    // features
+    coopMat2 = coopMat && hasExtension(createInfo, VK_NV_COOPERATIVE_MATRIX_2_EXTENSION_NAME) &&
+               getEnvInt("VK_OIDN_CM2", 0) > 0 && getEmbeddedKernel("conv_cm2", nullptr) != nullptr;
 
     // Pipeline layout: push constants only (all memory is accessed through device addresses)
     VkPushConstantRange pushRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, maxParamsByteSize};
