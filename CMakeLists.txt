@@ -36,16 +36,76 @@ target_include_directories(vk_oidn PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(vk_oidn PUBLIC Vulkan::Headers)
 target_compile_definitions(vk_oidn PRIVATE VK_NO_PROTOTYPES) # functions are loaded at runtime
 
+# Kernels: <name>|<entry point>|<comma-separated defines>
+# Each kernel is compiled with float controls (FP16 round-to-nearest-even and denormal
+# preservation) and without them (suffix "_nofc") for devices which do not support them.
+set(VK_OIDN_SHADER ${CMAKE_CURRENT_SOURCE_DIR}/shaders/vk_oidn.slang)
+set(VK_OIDN_KERNELS
+  "input_process|inputProcess|"
+  "output_process|outputProcess|"
+  "image_copy|imageCopy|"
+  "autoexposure_downsample|autoexposureDownsample|"
+  "autoexposure_reduce|autoexposureReduce|"
+  "autoexposure_reduce_final|autoexposureReduceFinal|"
+  "conv_simple|convSimple|"
+  "conv_coopmat_mx2_nf2|convCoopMat|MX=2,N_FRAGS=2"
+  "conv_coopmat_mx3_nf2|convCoopMat|MX=3,N_FRAGS=2"
+  "conv_coopmat_mx2_nf1|convCoopMat|MX=2,N_FRAGS=1"
+  "conv_coopmat_mx2_nf2_f16acc|convCoopMat|MX=2,N_FRAGS=2,ACC_F16"
+  "conv_coopmat_mx3_nf2_f16acc|convCoopMat|MX=3,N_FRAGS=2,ACC_F16"
+  "conv_coopmat_mx2_nf1_f16acc|convCoopMat|MX=2,N_FRAGS=1,ACC_F16"
+)
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+set(VK_OIDN_SPV_DIR ${CMAKE_CURRENT_BINARY_DIR}/spv)
+set(VK_OIDN_SPV_FILES)
+foreach(kernel ${VK_OIDN_KERNELS})
+  string(REPLACE "|" ";" kernel_parts "${kernel}")
+  list(GET kernel_parts 0 kernel_name)
+  list(GET kernel_parts 1 kernel_entry)
+  list(GET kernel_parts 2 kernel_defines)
+
+  set(define_args)
+  if(kernel_defines)
+    string(REPLACE "," ";" kernel_defines "${kernel_defines}")
+    foreach(def ${kernel_defines})
+      list(APPEND define_args "-D${def}")
+    endforeach()
+  endif()
+
+  set(spv ${VK_OIDN_SPV_DIR}/${kernel_name}.spv)
+  set(spv_nofc ${VK_OIDN_SPV_DIR}/${kernel_name}_nofc.spv)
+  set(spv_tmp ${VK_OIDN_SPV_DIR}/${kernel_name}_tmp.spv)
+  set(slangc_args -target spirv -profile spirv_1_5 -O1 -warnings-disable 41012 -entry ${kernel_entry} ${define_args})
+  add_custom_command(
+    OUTPUT ${spv} ${spv_nofc}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${VK_OIDN_SPV_DIR}
+    COMMAND ${VK_OIDN_SLANGC} ${VK_OIDN_SHADER} ${slangc_args} -denorm-mode-fp16 preserve -o ${spv_tmp}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/spirv_float_controls.py ${spv_tmp} ${spv}
+    COMMAND ${CMAKE_COMMAND} -E remove ${spv_tmp}
+    COMMAND ${VK_OIDN_SLANGC} ${VK_OIDN_SHADER} ${slangc_args} -o ${spv_nofc}
+    DEPENDS ${VK_OIDN_SHADER} ${CMAKE_CURRENT_SOURCE_DIR}/tools/spirv_float_controls.py
+    COMMENT "vk_oidn: compiling kernel ${kernel_name}"
+    VERBATIM
+  )
+  list(APPEND VK_OIDN_SPV_FILES ${spv} ${spv_nofc})
+endforeach()
+
+set(VK_OIDN_KERNELS_CPP ${CMAKE_CURRENT_BINARY_DIR}/generated/kernels_embedded.cpp)
+add_custom_command(
+  OUTPUT ${VK_OIDN_KERNELS_CPP}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_files.py
+          -o ${VK_OIDN_KERNELS_CPP} -n getEmbeddedKernel ${VK_OIDN_SPV_FILES}
+  DEPENDS ${VK_OIDN_SPV_FILES} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_files.py
+  COMMENT "vk_oidn: embedding kernels"
+  VERBATIM
+)
+target_sources(vk_oidn PRIVATE ${VK_OIDN_KERNELS_CPP} src/kernels.h ${VK_OIDN_SHADER})
+source_group("Shaders" FILES ${VK_OIDN_SHADER})
+
 # Embedded weights
 file(GLOB VK_OIDN_WEIGHT_FILES ${CMAKE_CURRENT_SOURCE_DIR}/weights/*.vkoidnw)
-if(VK_OIDN_EMBED_WEIGHTS)
-  find_package(Python3 COMPONENTS Interpreter)
-  if(NOT Python3_FOUND)
-    message(WARNING "vk_oidn: Python 3 not found, the weights will not be embedded")
-    set(VK_OIDN_EMBED_WEIGHTS OFF)
-  endif()
-endif()
-
 if(VK_OIDN_EMBED_WEIGHTS)
   set(VK_OIDN_EMBEDDED_WEIGHTS_CPP ${CMAKE_CURRENT_BINARY_DIR}/generated/weights_embedded.cpp)
   add_custom_command(
