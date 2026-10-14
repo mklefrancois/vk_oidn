@@ -228,6 +228,13 @@ def pack(tensors):
 
   align_data()
 
+  # Tensors that are not part of the known topology mean a different network structure
+  used = {name + suffix for name, _, _, _ in topology for suffix in ('.weight', '.bias')}
+  unknown = sorted(set(tensors) - used)
+  if unknown:
+    raise ValueError('unknown tensors %s: the network structure differs from the %s U-Net of '
+                     'Open Image Denoise known by vk_oidn' % (', '.join(unknown), 'large' if large else 'base'))
+
   output_channels = logical[topology[-1][0]]
   data_offset = round_up(64 + 64 * len(layers), ALIGNMENT)
   header = struct.pack(HEADER_FORMAT, MAGIC, VERSION, 64, len(layers),
