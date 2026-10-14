@@ -353,7 +353,12 @@ void inputProcess(uint3 globalID : SV_DispatchThreadID, uniform InputProcessPara
     const int wSrc = w + p.wSrcBegin;
 
     // Input
-    const float inputScale = (p.inputScalePtr != 0ull) ? *(float*)p.inputScalePtr : p.inputScale;
+    // The scale is read from a valid address even without autoexposure (inputScalePtr = 0), then
+    // selected: some implementations (e.g. lavapipe) perform loads from null pointers inside
+    // uniform branches that are not taken. The value read from dst is not used.
+    const bool scaleFromPtr = p.inputScalePtr != 0ull;
+    const float loadedScale = *(float*)(scaleFromPtr ? p.inputScalePtr : p.dst);
+    const float inputScale = scaleFromPtr ? loadedScale : p.inputScale;
     float3 v = loadInput(IMAGE_COLOR, p.inputPtr, p.inputHStride, p.inputFmt, hSrc, wSrc) * inputScale;
     v = clamp(nanToZero(v), snorm ? -1. : 0., hdr ? FLT_MAX : 1.);
     if (snorm)
@@ -461,12 +466,12 @@ void outputProcess(uint3 globalID : SV_DispatchThreadID, uniform OutputProcessPa
   if (!hdr)
     v = min(v, 1.);
 
+  // Read from a valid address even without autoexposure (see inputProcess), then select
   float outputScale = p.outputScale;
-  if (p.inputScalePtr != 0ull)
-  {
-    const float inputScale = *(float*)p.inputScalePtr;
+  const bool scaleFromPtr = p.inputScalePtr != 0ull;
+  const float inputScale = *(float*)(scaleFromPtr ? p.inputScalePtr : p.src);
+  if (scaleFromPtr)
     outputScale = (inputScale != 0.) ? (1. / inputScale) : 0.;
-  }
 
   storeOutput(p.dst, p.dstHStride, p.dstFmt, p.flags, hDst, wDst, v * outputScale);
 }
