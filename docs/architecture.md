@@ -202,13 +202,48 @@ Design points:
   multiplications of the current one, with a single barrier per chunk.
 - **Pooling fusion**: each subgroup owns two consecutive output rows, which are exactly the rows
   of the 2x2 pooling windows, so pooling needs no exchange between subgroups.
-- **Upsampling and concatenation fusion**: done while loading the input tile into shared memory
-  (the upsampled tensor and the concatenated tensor never exist in memory).
+- **Upsampling and concatenation fusion**: the concatenation is done while loading the input
+  tile into shared memory (the concatenated tensor never exists in memory). For the upsampled
+  source, a dedicated kernel (`convCoopMatUp`) uses a **sub-pixel decomposition**: a 3x3
+  convolution of a 2x nearest-upsampled tensor equals four 2x2 convolutions of the
+  low-resolution tensor (one per output phase) with combined weights, which needs 56% fewer
+  multiply-adds. Each subgroup computes one phase, so each combined weight tile is reused by
+  4 matrix fragments (section below).
 - **Per-layer tile selection**: 32x8 pixels x 32 channels by default, 48 pixels wide for layers
   with more than 64 input channels (more reuse of the weights), and 16 channels per workgroup for
   layers with an odd number of 16-channel blocks or too few workgroups to fill the GPU.
 - **Fallback**: GPUs without cooperative matrices (and non-NVIDIA GPUs by default) use a plain
   FMA kernel with the same tiling of the input.
+
+### Sub-pixel decomposition of the upsampling layers
+
+```mermaid
+flowchart LR
+    subgraph Before ["Fused upsampling (generic kernel)"]
+        direction TB
+        S1["low-res source S<br/>H/2 x W/2"] -->|"nearest 2x<br/>(on load)"| U1["U, H x W"]
+        U1 -->|"3x3 convolution<br/>9 taps per pixel"| O1["output H x W"]
+    end
+
+    subgraph After ["Sub-pixel decomposition (convCoopMatUp)"]
+        direction TB
+        S2["low-res source S<br/>H/2 x W/2"] --> P00["phase (0,0)<br/>2x2 taps, combined weights"]
+        S2 --> P01["phase (0,1)<br/>2x2 taps"]
+        S2 --> P10["phase (1,0)<br/>2x2 taps"]
+        S2 --> P11["phase (1,1)<br/>2x2 taps"]
+        P00 --> O2["output H x W<br/>(interleaved phases)"]
+        P01 --> O2
+        P10 --> O2
+        P11 --> O2
+    end
+```
+
+Along each axis, output position 2m + p reads the upsampled positions 2m + p - 1, 2m + p, 2m + p + 1,
+which are the source pixels {m - 1, m, m} for p = 0 and {m, m, m + 1} for p = 1. The weights of
+the taps reading the same source pixel are summed (on the host, when the denoiser is created):
+p = 0 uses {w0, w1 + w2} at offsets {-1, 0}, p = 1 uses {w0 + w1, w2} at offsets {0, +1}. The
+skip connection (second source, full resolution) is convolved normally. Disable with
+`VK_OIDN_SUBPIXEL=0`.
 
 ## 5. Build pipeline
 
@@ -230,10 +265,11 @@ flowchart LR
     SRC["src/*.cpp"] --> LIB
 ```
 
-The Slang file is compiled into 16 kernels: input processing, output processing and the
+The Slang file is compiled into 20 kernels: input processing, output processing and the
 autoexposure downsampling (each with buffer and storage image I/O), the two autoexposure
-reductions, image copy, the fallback convolution, and 6 cooperative matrix convolution variants
-(3 tile shapes x FP32/FP16 accumulation). Each is compiled with and without FP16 float controls;
+reductions, image copy, the fallback convolution, 6 cooperative matrix convolution variants
+(3 tile shapes x FP32/FP16 accumulation) and 4 sub-pixel upsampling convolution variants
+(2 tile shapes x FP32/FP16 accumulation). Each is compiled with and without FP16 float controls;
 the variant without them is used on devices which do not support round-to-nearest-even and
 denormal preservation for FP16. The experimental `VK_NV_cooperative_matrix2` convolution
 (`shaders/experimental/conv_cm2.comp`) is written in GLSL and compiled with glslang.

@@ -82,22 +82,29 @@ the validation layer is clean.
 
 Run with [`tests/scripts/run_validation.sh`](../tests/scripts/run_validation.sh), which drives
 `vk_oidn_denoise_test` (a standalone application creating its own Vulkan device with the vk_oidn
-requirement helpers). Every configuration passes against the CPU reference **and** is
-bit-identical to the OIDN fork running the same kernels, at 333x197 and 1920x1080:
+requirement helpers). Every configuration passes against the CPU reference at 333x197 and
+1920x1080. vk_oidn uses a sub-pixel decomposition for the upsampling layers (see the
+performance section), which the OIDN fork does not have; with it disabled
+(`VK_OIDN_SUBPIXEL=0`), the output is **bit-identical** to the OIDN fork running the same kernels
+in every configuration.
 
-| Configuration | Weights selected          | Tiles (1080p) | avgerror (333x197) |
-|---------------|---------------------------|---------------|--------------------|
-| hdr           | rt_hdr                    | 1 | 0.000334 |
-| hdr_alb       | rt_hdr_alb                | 1 | 0.000337 |
-| hdr_alb_nrm   | rt_hdr_alb_nrm            | 1 | 0.000340 |
-| hdr_calb_cnrm | rt_hdr_calb_cnrm_large    | 1 | 0.000313 |
-| hdr_alb_nrm_f | rt_hdr_alb_nrm_small      | 1 | 0.00117  |
-| hdr_alb_nrm_b | rt_hdr_alb_nrm            | 1 | 0.00135  |
-| hdr_is        | rt_hdr_alb_nrm            | 1 | 0.000483 |
-| ldr_alb_nrm   | rt_ldr_alb_nrm            | 1 | 0.000230 |
-| ldr_srgb_an   | rt_ldr_alb_nrm            | 1 | 0.000101 |
-| hdr_half      | rt_hdr_alb_nrm            | 1 | 0.000341 |
-| hdr_tiled     | rt_hdr_alb_nrm (`--maxmem 200`) | 4 | 0.000340 |
+| Configuration | Weights selected          | Tiles (1080p) | avgerror, 333x197 (`VK_OIDN_SUBPIXEL=0`) |
+|---------------|---------------------------|---------------|-------------------------------------------|
+| hdr           | rt_hdr                    | 1 | 0.000335 (0.000334) |
+| hdr_alb       | rt_hdr_alb                | 1 | 0.000340 (0.000337) |
+| hdr_alb_nrm   | rt_hdr_alb_nrm            | 1 | 0.000342 (0.000340) |
+| hdr_calb_cnrm | rt_hdr_calb_cnrm_large    | 1 | 0.000314 (0.000313) |
+| hdr_alb_nrm_f | rt_hdr_alb_nrm_small      | 1 | 0.00112 (0.00117)  |
+| hdr_alb_nrm_b | rt_hdr_alb_nrm            | 1 | 0.00128 (0.00135)  |
+| hdr_is        | rt_hdr_alb_nrm            | 1 | 0.000484 (0.000483) |
+| ldr_alb_nrm   | rt_ldr_alb_nrm            | 1 | 0.000236 (0.000230) |
+| ldr_srgb_an   | rt_ldr_alb_nrm            | 1 | 0.000105 (0.000101) |
+| hdr_half      | rt_hdr_alb_nrm            | 1 | 0.000343 (0.000341) |
+| hdr_tiled     | rt_hdr_alb_nrm (`--maxmem 200`) | 4 | 0.000342 (0.000340) |
+
+The sub-pixel decomposition changes the error by less than 0.00001 in the high quality modes
+(the combined weights are rounded to FP16) and slightly reduces it in the FP16-accumulation modes
+(fewer accumulation steps).
 
 With `--images` (RGBA32F / RGBA16F storage image views instead of buffers), the outputs are
 bit-identical to the buffer path and the alpha channel of the output image is preserved. The
@@ -112,6 +119,8 @@ export OIDN_FORK_DENOISE=<oidn-vulkan build>/oidnDenoise.exe  # optional bit-ide
 tests/scripts/run_validation.sh images/odd
 tests/scripts/run_validation.sh images/odd --images
 ```
+
+The bit-identity check against the fork uses a second vk_oidn run with `VK_OIDN_SUBPIXEL=0`.
 
 ### Issues found and fixed during validation
 
@@ -143,39 +152,42 @@ processed in 2 tiles (OIDN's default maximum of 2160x2160 pixels per tile).
 
 ### Final results
 
-| Resolution | Quality | OIDN 2.5.1 CUDA | OIDN fork, GLSL | OIDN fork, Slang | **vk_oidn** |
-|------------|---------|-----------------|-----------------|------------------|-------------|
-| 1280x720   | high    | 3.50 ms         | 3.67 ms         | 3.43 ms          |             |
-| 1920x1080  | high    | 8.10 ms         | 8.12 ms         | 7.50 ms          | **7.31 ms** |
-| 3840x2160  | high    | 34.65 ms        | 33.66 ms        | 30.72 ms         | **30.30 ms** |
-| 1280x720   | fast    | 2.36 ms         | 1.88 ms         | 1.90 ms          |             |
-| 1920x1080  | fast    | 5.55 ms         | 4.14 ms         | 4.17 ms          | **3.95 ms** |
-| 3840x2160  | fast    | 23.41 ms        | 16.50 ms        | 16.50 ms         | **16.09 ms** |
+| Resolution | Quality | OIDN 2.5.1 CUDA | OIDN fork, GLSL | OIDN fork, Slang | vk_oidn, no sub-pixel | **vk_oidn** |
+|------------|---------|-----------------|-----------------|------------------|-----------------------|-------------|
+| 1280x720   | high    | 3.50 ms         | 3.67 ms         | 3.43 ms          |                       |             |
+| 1920x1080  | high    | 8.10 ms         | 8.12 ms         | 7.50 ms          | 7.29 ms               | **6.72 ms** |
+| 3840x2160  | high    | 34.65 ms        | 33.66 ms        | 30.72 ms         | 30.22 ms              | **27.83 ms** |
+| 1280x720   | fast    | 2.36 ms         | 1.88 ms         | 1.90 ms          |                       |             |
+| 1920x1080  | fast    | 5.55 ms         | 4.14 ms         | 4.17 ms          | 3.96 ms               | **3.65 ms** |
+| 3840x2160  | fast    | 23.41 ms        | 16.50 ms        | 16.50 ms         | 16.03 ms              | **14.63 ms** |
 
-vk_oidn with storage image views: 7.39 ms (1080p, high). vk_oidn is slightly faster than the fork
-with the same kernels because everything is recorded in the application's command buffer, with
-no host-side overhead.
+vk_oidn is 1.2x (high) to 1.6x (fast) faster than OIDN's CUDA backend on this GPU. Without the
+sub-pixel decomposition it runs the same kernels as the fork and is slightly faster because
+everything is recorded in the application's command buffer, with no host-side overhead. Storage
+image views instead of buffers do not change the time (7.39 ms vs 7.31 ms before the sub-pixel
+decomposition).
 
 Memory (scratch + weights) for 1920x1080: 384 MB (base network), 518 MB (large network),
 256 MB (small network); 3840x2160 in 2 tiles: 799 MB.
 
-### Per-layer times (vk_oidn, 1920x1080 tile, high quality)
+### Per-layer times (vk_oidn, 1920x1088 tile, high quality)
 
-| Layer      | Time     | Layer      | Time     |
-|------------|----------|------------|----------|
-| input      | 0.167 ms | dec_conv4a | 0.177 ms |
-| enc_conv0  | 0.260 ms | dec_conv4b | 0.130 ms |
-| enc_conv1  | 0.445 ms | dec_conv3a | 0.467 ms |
-| enc_conv2  | 0.205 ms | dec_conv3b | 0.310 ms |
-| enc_conv3  | 0.109 ms | dec_conv2a | 0.808 ms |
-| enc_conv4  | 0.059 ms | dec_conv2b | 0.509 ms |
-| enc_conv5a | 0.026 ms | dec_conv1a | 1.956 ms |
-| enc_conv5b | 0.029 ms | dec_conv1b | 0.943 ms |
-| output     | 0.072 ms | dec_conv0  | 0.295 ms |
-|            |          | **total**  | **6.97 ms** |
+| Layer      | Time     | Layer      | Without sub-pixel | With sub-pixel |
+|------------|----------|------------|-------------------|----------------|
+| input      | 0.168 ms | dec_conv4a | 0.181 ms | **0.139 ms** (1.30x) |
+| enc_conv0  | 0.259 ms | dec_conv4b | 0.130 ms | 0.130 ms |
+| enc_conv1  | 0.444 ms | dec_conv3a | 0.479 ms | **0.372 ms** (1.29x) |
+| enc_conv2  | 0.204 ms | dec_conv3b | 0.309 ms | 0.309 ms |
+| enc_conv3  | 0.109 ms | dec_conv2a | 0.817 ms | **0.671 ms** (1.22x) |
+| enc_conv4  | 0.058 ms | dec_conv2b | 0.507 ms | 0.507 ms |
+| enc_conv5a | 0.025 ms | dec_conv1a | 1.955 ms | **1.628 ms** (1.20x) |
+| enc_conv5b | 0.029 ms | dec_conv1b | 0.934 ms | 0.934 ms |
+| output     | 0.073 ms | dec_conv0  | 0.297 ms | 0.297 ms |
+|            |          | **total**  | **7.01 ms** | **6.36 ms** |
 
-The full-resolution decoder layers dominate: `dec_conv1a` alone (upsampled 64 channels +
-16 input channels → 64 channels, 193 GFLOP) takes 28% of the time, at about 98 TFLOPS.
+The full-resolution decoder layers dominate. Without the sub-pixel decomposition, `dec_conv1a`
+(upsampled 64 channels + 16 input channels → 64 channels, 193 GFLOP) takes 28% of the time, at
+about 98 TFLOPS.
 
 ### Optimization history (1920x1080, high quality)
 
@@ -188,7 +200,9 @@ The full-resolution decoder layers dominate: `dec_conv1a` alone (upsampled 64 ch
 | 5 | Slang port, `[ForceUnroll]`, `-O2` | 9.99 ms |
 | 6 | Slang `[unroll]` (driver unrolling) | 8.61 ms |
 | 7 | Slang `-O1` | **7.50 ms** |
-| 8 | vk_oidn SDK (same kernels, no host overhead) | **7.31 ms** |
+| 8 | vk_oidn SDK (same kernels, no host overhead) | 7.31 ms |
+| 9 | sub-pixel decomposition of the upsampling layers, first version (each subgroup owns fragments of 4 different phases) | 7.79 ms |
+| 10 | sub-pixel decomposition, one phase per subgroup (each weight tile feeds 4 fragments) | **6.72 ms** |
 
 Tile sweep (step 3; SG = subgroups per workgroup, MX = 16-pixel column fragments per subgroup
 row, NF = 16-channel output blocks per workgroup; accumulators per subgroup = 2 x MX x NF):
@@ -242,11 +256,28 @@ multiply-add, or using cooperative matrix 2 only for the matrix multiplications 
 the explicit shared memory tiling. Note that Slang's tensor addressing currently requires
 descriptor-bound buffers, which is why this kernel is written in GLSL.
 
+### Sub-pixel decomposition of the upsampling layers
+
+The four decoder layers `dec_conv*a` convolve a 2x nearest-upsampled tensor (concatenated with a
+skip connection). A 3x3 convolution of an upsampled tensor is exactly four 2x2 convolutions of the
+low-resolution tensor, one per output phase (row parity, column parity), with combined weights
+(along each axis: phase 0 uses offsets {-1, 0} with weights {w0, w1 + w2}, phase 1 offsets
+{0, +1} with {w0 + w1, w2}). This removes 56% of the multiply-adds of the upsampled source, which
+is most of the work of these layers (e.g. 64 of the 80 input channels of `dec_conv1a`).
+
+In the kernel (`convCoopMatUp`), each 16-pixel matrix fragment holds output pixels of a single
+phase (every other pixel of a row), so all its rows use the same combined weights; the
+low-resolution source is read from a half-resolution shared memory tile, and the skip connection
+with stride-2 rows from the full-resolution tile.
+
+The first version gave each subgroup the 4 phases of 2 rows. It was **slower** (7.79 ms vs
+7.31 ms): each weight tile was used by a single fragment, so the kernel became bound by the weight
+loads (the original kernel reuses each weight tile for 4 fragments). Giving each subgroup one
+phase (4 rows of the same parity) restores the reuse and gives the speedup above: 1.20-1.40x on
+the upsampling layers, about 8% overall (1080p high: 7.29 → 6.72 ms, fast: 3.96 → 3.65 ms;
+4K high: 30.22 → 27.83 ms, fast: 16.03 → 14.63 ms).
+
 ## Ideas for further speedups
 
-- **Sub-pixel decomposition of the upsampling layers**: a 3x3 convolution of a 2x nearest
-  upsampled tensor equals four 2x2 convolutions of the low-resolution tensor with combined
-  weights, which removes 56% of the multiply-adds for the upsampled part of `dec_conv*a` layers
-  (`dec_conv1a` is 28% of the total time).
 - Larger K chunks (32 channels) and weights staged in shared memory in the KHR kernel.
 - FP8 or block-scaled formats on Blackwell (would need retraining or quantization analysis).

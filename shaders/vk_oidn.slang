@@ -15,6 +15,8 @@
 //   autoexposureReduce       bins -> partial log2 sums
 //   autoexposureReduceFinal  partial sums -> exposure scale
 //   convCoopMat              3x3 convolution with cooperative matrices (tensor cores)
+//   convCoopMatUp            same, with the first source 2x upsampled, using a sub-pixel
+//                            decomposition (2.25x fewer multiply-adds for that source)
 //   convSimple               3x3 convolution without cooperative matrices (fallback)
 //
 // Compile-time options (preprocessor):
@@ -953,6 +955,283 @@ void convCoopMat(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, un
             storeFragment(p, MatO(acc[m][mx][n]), sg, lane, numLanes, y, x0 + mx * 16, nb);
         }
       }
+    }
+  }
+}
+
+// -------------------------------------------------------------------------------------------------
+// 3x3 convolution of a 2x upsampled source with cooperative matrices (sub-pixel decomposition)
+// -------------------------------------------------------------------------------------------------
+//
+// A 3x3 convolution of a 2x nearest-upsampled tensor U(y, x) = S(y / 2, x / 2) is equivalent to
+// four 2x2 convolutions of S, one per output phase (py, px) = (y % 2, x % 2), with combined
+// weights: along each axis, phase 0 uses the source offsets {-1, 0} with the weights {w0, w1 + w2}
+// and phase 1 the offsets {0, +1} with {w0 + w1, w2}. This reduces the multiply-adds for the
+// upsampled source from 9 to 4 taps per output pixel. The zero padding is also equivalent, since
+// U is outside the image exactly when S is.
+//
+// The output tile is 8 rows x 32 pixels. Each matrix fragment contains the 16 pixels of one output
+// row with the same horizontal phase (x = x0 + px + 2 * j), so all its rows use the same weights.
+// Each subgroup computes one phase (py, px) = (sg / 2, sg % 2): the 4 output rows y0 + py + 2 * i,
+// so every weight tile loaded is used by 4 fragments. The second source (concatenated, full
+// resolution) is convolved as usual, with stride-2 pixel rows.
+//
+// Packed weights: first source chunks [kc][phase = py * 2 + px][tap = (dy + 1 - py) * 2 + (dx + 1 - px)]
+// [block][16][16], then second source chunks [kc][tap][block][16][16] (see the host code).
+
+static const int UP_TW = 32;
+static const int UP_IN0_W = UP_TW / 2 + 2; // first source tile (half resolution) with halo
+static const int UP_IN0_H = CM_TH / 2 + 2;
+static const int UP_IN1_W = UP_TW + 2;     // second source tile with halo
+static const int UP_IN1_H = CM_TH + 2;
+static const int UP_LOADS0 = UP_IN0_H * UP_IN0_W * 2;
+static const int UP_LOADS1 = UP_IN1_H * UP_IN1_W * 2;
+static const int UP_TILE_SIZE = UP_IN1_H * UP_IN1_W * KSTR; // in uint4 units (largest tile)
+static const int UP_MAX_LOADS = (UP_LOADS1 + CM_NUM_SG * 32 - 1) / (CM_NUM_SG * 32);
+
+groupshared uint4 upIn[2 * UP_TILE_SIZE];
+
+// Loads the i-th uint4 of the input tile of the specified chunk (zero outside the image)
+uint4 loadUpInput(ConvParams p, int kc, int i, int y0, int x0)
+{
+  const int numChunks0 = p.C0 / 16;
+  const int pix = i >> 1;
+  const int part = i & 1;
+  if (kc < numChunks0)
+  {
+    // First source: half resolution tile
+    if (i >= UP_LOADS0)
+      return uint4(0);
+    const int hy = pix / UP_IN0_W;
+    const int hx = pix - hy * UP_IN0_W;
+    const int sy = (y0 >> 1) - 1 + hy;
+    const int sx = (x0 >> 1) - 1 + hx;
+    const int H0 = p.H >> 1;
+    const int W0 = p.W >> 1;
+    if (sy < 0 || sy >= H0 || sx < 0 || sx >= W0)
+      return uint4(0);
+    return *(uint4*)(p.src0 + (uint64_t(sy * W0 + sx) * uint64_t(p.C0) + uint64_t(kc * 16 + part * 8)) * 2ull);
+  }
+  else
+  {
+    // Second source: full resolution tile
+    if (i >= UP_LOADS1)
+      return uint4(0);
+    const int ty = pix / UP_IN1_W;
+    const int tx = pix - ty * UP_IN1_W;
+    const int y = y0 - 1 + ty;
+    const int x = x0 - 1 + tx;
+    if (y < 0 || y >= p.H || x < 0 || x >= p.W)
+      return uint4(0);
+    return *(uint4*)(p.src1 + (uint64_t(y * p.W + x) * uint64_t(p.C1) + uint64_t((kc - numChunks0) * 16 + part * 8)) * 2ull);
+  }
+}
+
+// Returns the byte offset of a weight block of the first source (phase, 2x2 tap)
+uint64_t getUpWeightOffset0(ConvParams p, int kc, int phase, int tap, int nb)
+{
+  return uint64_t(((kc * 4 + phase) * 4 + tap) * p.NB + nb) * 512ull;
+}
+
+// Returns the byte offset of a weight block of the second source (3x3 tap)
+uint64_t getUpWeightOffset1(ConvParams p, int kc1, int tap, int nb)
+{
+  const int base = (p.C0 / 16) * 16 * p.NB;
+  return uint64_t(base + (kc1 * 9 + tap) * p.NB + nb) * 512ull;
+}
+
+// Stores an output fragment containing the pixels x0 + 2 * j of a row
+void storeFragmentStride2(ConvParams p, MatO o, int sg, uint lane, uint numLanes, int y, int x0, int nb)
+{
+  if (x0 + 30 < p.W)
+  {
+    // Store directly to the destination (every other pixel)
+    o.Store<CoopMatMatrixLayout.RowMajor>((half*)getDstAddress(p, y, x0, p.W, nb * 16), 0, uint(p.NB * 32));
+  }
+  else
+  {
+    // Partial fragment: store through shared memory (the staging area of the subgroup)
+    o.Store<CoopMatMatrixLayout.RowMajor>(upIn, uint(sg * 32), 2);
+    subgroupSharedBarrier();
+
+    for (uint i = lane; i < 32u; i += numLanes)
+    {
+      const int px = int(i >> 1);
+      const int part = int(i & 1);
+      const int x = x0 + px * 2;
+      if (x < p.W)
+        *(uint4*)getDstAddress(p, y, x, p.W, nb * 16 + part * 8) = upIn[sg * 32 + int(i)];
+    }
+
+    subgroupSharedBarrier();
+  }
+}
+
+[shader("compute")]
+[numthreads(WG_SIZE, 1, 1)]
+void convCoopMatUp(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, uniform ConvParams p)
+{
+  const int sg = int(getSubgroupID());
+  const uint lane = WaveGetLaneIndex();
+  const uint numLanes = WaveGetLaneCount();
+  const int x0 = int(groupID.x) * UP_TW;
+  const int y0 = int(groupID.y) * CM_TH;
+  const int nb0 = int(groupID.z) * N_FRAGS;
+  const int numChunks0 = p.C0 / 16;
+  const int numChunks = (p.C0 + p.C1) / 16;
+  const int py = sg >> 1; // output phase of the subgroup
+  const int px = sg & 1;
+
+  // Start loading the first input chunk
+  uint4 prefetch[UP_MAX_LOADS];
+  [unroll]
+  for (int j = 0; j < UP_MAX_LOADS; ++j)
+    prefetch[j] = loadUpInput(p, 0, int(localIndex) + j * int(WG_SIZE), y0, x0);
+
+  // Initialize the accumulators with the bias: [output row of the phase][output block]
+  MatC acc[4][N_FRAGS];
+  [unroll]
+  for (int n = 0; n < N_FRAGS; ++n)
+  {
+    MatC b = MatC(AccT(0.));
+    if (nb0 + n < p.NB)
+    {
+    #if defined(ACC_F16)
+      b = MatC.Load<CoopMatMatrixLayout.RowMajor>((half*)(p.bias + uint64_t(nb0 + n) * 512ull), 0, 16);
+    #else
+      b = MatC.Load<CoopMatMatrixLayout.RowMajor>((float*)(p.bias + uint64_t(nb0 + n) * 1024ull), 0, 16);
+    #endif
+    }
+    [unroll]
+    for (int i = 0; i < 4; ++i)
+      acc[i][n] = b;
+  }
+
+  [unroll]
+  for (int j = 0; j < UP_MAX_LOADS; ++j)
+  {
+    const int i = int(localIndex) + j * int(WG_SIZE);
+    if (i < UP_LOADS1)
+      upIn[(i >> 1) * KSTR + (i & 1)] = prefetch[j];
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  for (int kc = 0; kc < numChunks; ++kc)
+  {
+    const int base = (kc & 1) * UP_TILE_SIZE;
+
+    // Prefetch the next chunk
+    if (kc + 1 < numChunks)
+    {
+      [unroll]
+      for (int j = 0; j < UP_MAX_LOADS; ++j)
+        prefetch[j] = loadUpInput(p, kc + 1, int(localIndex) + j * int(WG_SIZE), y0, x0);
+    }
+
+    if (kc < numChunks0)
+    {
+      // First source (upsampled): 2x2 convolution of the half resolution tile for the phase
+      [unroll]
+      for (int tap = 0; tap < 4; ++tap)
+      {
+        const int dy = py - 1 + (tap >> 1); // {-1, 0} for phase 0, {0, +1} for phase 1
+        const int dx = px - 1 + (tap & 1);
+
+        MatB b[N_FRAGS];
+        [unroll]
+        for (int n = 0; n < N_FRAGS; ++n)
+        {
+          if (nb0 + n < p.NB)
+            b[n] = MatB.Load<CoopMatMatrixLayout.RowMajor>(
+              (half*)(p.weight + getUpWeightOffset0(p, kc, py * 2 + px, tap, nb0 + n)), 0, 16);
+        }
+
+        [unroll]
+        for (int i = 0; i < 4; ++i)
+        {
+          // Output row y0 + py + 2 * i maps to the half resolution row i of the tile
+          const MatA a = MatA.Load<CoopMatMatrixLayout.RowMajor>(
+            upIn, uint(base + ((i + 1 + dy) * UP_IN0_W + 1 + dx) * KSTR), KSTR);
+
+          [unroll]
+          for (int n = 0; n < N_FRAGS; ++n)
+          {
+            if (nb0 + n < p.NB)
+              acc[i][n] = coopMatMulAdd<AccT, false>(a, b[n], acc[i][n]);
+          }
+        }
+      }
+    }
+    else
+    {
+      // Second source (full resolution): 3x3 convolution with stride-2 pixel rows
+      const int kc1 = kc - numChunks0;
+      [unroll]
+      for (int tap = 0; tap < 9; ++tap)
+      {
+        const int ky = tap / 3;
+        const int kx = tap - ky * 3;
+
+        MatB b[N_FRAGS];
+        [unroll]
+        for (int n = 0; n < N_FRAGS; ++n)
+        {
+          if (nb0 + n < p.NB)
+            b[n] = MatB.Load<CoopMatMatrixLayout.RowMajor>(
+              (half*)(p.weight + getUpWeightOffset1(p, kc1, tap, nb0 + n)), 0, 16);
+        }
+
+        [unroll]
+        for (int i = 0; i < 4; ++i)
+        {
+          const int row = py + 2 * i;
+          const MatA a = MatA.Load<CoopMatMatrixLayout.RowMajor>(
+            upIn, uint(base + ((row + ky) * UP_IN1_W + px + kx) * KSTR), 2 * KSTR);
+
+          [unroll]
+          for (int n = 0; n < N_FRAGS; ++n)
+          {
+            if (nb0 + n < p.NB)
+              acc[i][n] = coopMatMulAdd<AccT, false>(a, b[n], acc[i][n]);
+          }
+        }
+      }
+    }
+
+    // Store the next chunk into the other buffer, which is no longer being read
+    if (kc + 1 < numChunks)
+    {
+      const int nextBase = ((kc + 1) & 1) * UP_TILE_SIZE;
+      [unroll]
+      for (int j = 0; j < UP_MAX_LOADS; ++j)
+      {
+        const int i = int(localIndex) + j * int(WG_SIZE);
+        if (i < UP_LOADS1)
+          upIn[nextBase + (i >> 1) * KSTR + (i & 1)] = prefetch[j];
+      }
+    }
+    GroupMemoryBarrierWithGroupSync();
+  }
+
+  // Epilogue (the input tile buffers are reused as staging areas)
+  [unroll]
+  for (int n = 0; n < N_FRAGS; ++n)
+  {
+    const int nb = nb0 + n;
+    if (nb >= p.NB)
+      continue;
+
+    [unroll]
+    for (int i = 0; i < 4; ++i)
+    {
+      const int y = y0 + py + 2 * i;
+      if (RELU)
+      {
+        for (int e = 0; e < acc[i][n].GetLength(); ++e)
+          acc[i][n][e] = max(acc[i][n][e], AccT(0.));
+      }
+      if (y < p.H)
+        storeFragmentStride2(p, MatO(acc[i][n]), sg, lane, numLanes, y, x0 + px, nb);
     }
   }
 }

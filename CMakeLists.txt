@@ -62,6 +62,10 @@ set(VK_OIDN_KERNELS
   "conv_coopmat_mx2_nf2_f16acc|convCoopMat|MX=2,N_FRAGS=2,ACC_F16"
   "conv_coopmat_mx3_nf2_f16acc|convCoopMat|MX=3,N_FRAGS=2,ACC_F16"
   "conv_coopmat_mx2_nf1_f16acc|convCoopMat|MX=2,N_FRAGS=1,ACC_F16"
+  "conv_coopmat_up_nf2|convCoopMatUp|MX=2,N_FRAGS=2"
+  "conv_coopmat_up_nf1|convCoopMatUp|MX=2,N_FRAGS=1"
+  "conv_coopmat_up_nf2_f16acc|convCoopMatUp|MX=2,N_FRAGS=2,ACC_F16"
+  "conv_coopmat_up_nf1_f16acc|convCoopMatUp|MX=2,N_FRAGS=1,ACC_F16"
 )
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)

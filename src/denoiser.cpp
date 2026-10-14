@@ -46,6 +46,61 @@ namespace vkoidn {
       return (y <= 0.0031308f) ? (12.92f * y) : (1.055f * std::pow(y, 1.f / 2.4f) - 0.055f);
     }
 
+    float halfToFloat(uint16_t h)
+    {
+      const uint32_t sign = uint32_t(h & 0x8000) << 16;
+      uint32_t exp = (h >> 10) & 0x1F, mant = h & 0x3FF, x;
+      if (exp == 0)
+      {
+        if (mant == 0)
+          x = sign;
+        else
+        {
+          exp = 127 - 15 + 1;
+          while (!(mant & 0x400)) { mant <<= 1; --exp; }
+          x = sign | (exp << 23) | ((mant & 0x3FF) << 13);
+        }
+      }
+      else if (exp == 31)
+        x = sign | 0x7F800000 | (mant << 13);
+      else
+        x = sign | ((exp - 15 + 127) << 23) | (mant << 13);
+      float f;
+      memcpy(&f, &x, 4);
+      return f;
+    }
+
+    // Converts to FP16 with round-to-nearest-even
+    uint16_t floatToHalf(float f)
+    {
+      uint32_t x;
+      memcpy(&x, &f, 4);
+      const uint32_t sign = (x >> 16) & 0x8000;
+      const int exp = int((x >> 23) & 0xFF) - 127 + 15;
+      uint32_t mant = x & 0x7FFFFF;
+      if (((x >> 23) & 0xFF) == 0xFF)
+        return uint16_t(sign | 0x7C00 | (mant ? 0x200 : 0));
+      if (exp >= 31)
+        return uint16_t(sign | 0x7C00);
+      if (exp <= 0)
+      {
+        if (exp < -10)
+          return uint16_t(sign);
+        mant |= 0x800000;
+        const int shift = 14 - exp;
+        uint32_t h = mant >> shift;
+        const uint32_t rem = mant & ((1u << shift) - 1), halfway = 1u << (shift - 1);
+        if (rem > halfway || (rem == halfway && (h & 1)))
+          ++h;
+        return uint16_t(sign | h);
+      }
+      uint32_t h = (uint32_t(exp) << 10) | (mant >> 13);
+      const uint32_t rem = mant & 0x1FFF;
+      if (rem > 0x1000 || (rem == 0x1000 && (h & 1)))
+        ++h; // may carry into the exponent, which is correct
+      return uint16_t(sign | h);
+    }
+
     ImageParams getImageParams(const BufferImage& image, uint32_t width)
     {
       const uint32_t elementSize = (image.format == Format::Half) ? 2 : 4;
@@ -113,11 +168,15 @@ namespace vkoidn {
       int numFrags = 1;            // output blocks per workgroup (cooperative matrices)
       VkPipeline pipeline = VK_NULL_HANDLE;
 
+      // Sub-pixel decomposition of the upsampled first source (weights in extraBuffer)
+      bool subpixel = false;
+      uint64_t subpixelWeightOffset = 0;
+
       // Experimental VK_NV_cooperative_matrix2 kernel
       bool cm2 = false;
       int cm2BN = 0;               // output channels per workgroup
-      uint64_t cm2WeightOffset = 0; // [tap][K][N] f16 weights in cm2Buffer
-      uint64_t cm2BiasOffset = 0;   // [N] f32 bias in cm2Buffer
+      uint64_t cm2WeightOffset = 0; // [tap][K][N] f16 weights in extraBuffer
+      uint64_t cm2BiasOffset = 0;   // [N] f32 bias in extraBuffer
     };
 
     // Computes the tensor shapes and the scratch memory plan for the current tile size
@@ -167,8 +226,8 @@ namespace vkoidn {
     GpuBuffer stagingBuffer; // weights upload
     GpuBuffer scratchBuffer; // tensors
     GpuBuffer aeBuffer;      // autoexposure bins, partial sums and result
-    GpuBuffer cm2Buffer;     // weights for the experimental coopmat2 kernel
-    GpuBuffer cm2Staging;
+    GpuBuffer extraBuffer;   // repacked weights (sub-pixel and experimental coopmat2 kernels)
+    GpuBuffer extraStaging;
 
     // Profiling (VK_OIDN_PROFILE=1): GPU time of each dispatch of the first tile, averaged over
     // the executions and printed when the denoiser is destroyed
@@ -216,13 +275,13 @@ namespace vkoidn {
     ctx.destroyBuffer(stagingBuffer);
     ctx.destroyBuffer(scratchBuffer);
     ctx.destroyBuffer(aeBuffer);
-    ctx.destroyBuffer(cm2Buffer);
-    ctx.destroyBuffer(cm2Staging);
+    ctx.destroyBuffer(extraBuffer);
+    ctx.destroyBuffer(extraStaging);
   }
 
   uint64_t DenoiserImpl::getMemoryUsage() const
   {
-    return weightBuffer.byteSize + scratchBuffer.byteSize + aeBuffer.byteSize + cm2Buffer.byteSize;
+    return weightBuffer.byteSize + scratchBuffer.byteSize + aeBuffer.byteSize + extraBuffer.byteSize;
   }
 
   size_t DenoiserImpl::planMemory()
@@ -361,6 +420,21 @@ namespace vkoidn {
         layer.numFrags = BN / 16;
         if ((result = ctx.getPipeline("conv_cm2", {128, 0, 0, relu, uint32_t(BM), uint32_t(BN), uint32_t(BK)},
                                       false, layer.pipeline)) != Result::Success)
+          return result;
+      }
+      else if (ctx.isCooperativeMatrixEnabled() && upsample && !pool &&
+               !(getenv("VK_OIDN_SUBPIXEL") && atoi(getenv("VK_OIDN_SUBPIXEL")) == 0))
+      {
+        // Upsampled first source: sub-pixel decomposition (8x32 pixel tiles)
+        const int numTiles = ceilDiv(layer.convW, 32) * ceilDiv(layer.convH, 8) * ceilDiv(numBlocks, 2);
+        const int nf = (numBlocks % 2 != 0 || numTiles < 1200) ? 1 : 2;
+        layer.subpixel = true;
+        layer.tileW = 32;
+        layer.tileH = 8;
+        layer.numFrags = nf;
+        const std::string name = "conv_coopmat_up_nf" + std::to_string(nf) + (accF16 ? "_f16acc" : "");
+        const uint32_t workGroupSize = 4 * ctx.getSubgroupSize();
+        if ((result = ctx.getPipeline(name, {workGroupSize, upsample, pool, relu}, true, layer.pipeline)) != Result::Success)
           return result;
       }
       else if (ctx.isCooperativeMatrixEnabled())
@@ -523,10 +597,59 @@ namespace vkoidn {
         (result = ctx.createBuffer(weights.dataByteSize, true, stagingBuffer)) != Result::Success)
       return result;
 
-    // Repack the weights of the layers using the experimental coopmat2 kernel: [tap][K][N] f16
-    // weights and [N] f32 bias
+    // Repack the weights of the layers using the sub-pixel or experimental coopmat2 kernels
     {
-      std::vector<uint8_t> cm2Data;
+      std::vector<uint8_t> extraData;
+
+      // Sub-pixel decomposition: the 3x3 weights of the upsampled first source are combined into
+      // 2x2 weights per output phase. Along each axis, the source offset index t (0 or 1) of
+      // phase p covers the 3x3 taps: p = 0: t = 0 -> {0}, t = 1 -> {1, 2}; p = 1: t = 0 -> {0, 1},
+      // t = 1 -> {2}. The second source keeps the 3x3 layout.
+      static const int tapBegin[2][2] = {{0, 1}, {0, 2}};
+      static const int tapEnd[2][2]   = {{1, 3}, {2, 3}};
+      for (Layer& layer : layers)
+      {
+        if (!layer.subpixel)
+          continue;
+        const int NB = int(layer.desc.outChannels / 16);
+        const int numChunks0 = int(layer.desc.inChannels0 / 16);
+        const int numChunks1 = int(layer.desc.inChannels1 / 16);
+        const uint16_t* src = reinterpret_cast<const uint16_t*>(
+          static_cast<const uint8_t*>(weights.data) + layer.desc.weightOffset);
+        auto srcBlock = [&](int kc, int tap, int nb) { return src + ((size_t(kc) * 9 + tap) * NB + nb) * 256; };
+
+        const size_t numBlocks = size_t(numChunks0) * 16 * NB + size_t(numChunks1) * 9 * NB;
+        layer.subpixelWeightOffset = roundUp(extraData.size(), memoryAlignment);
+        extraData.resize(layer.subpixelWeightOffset + numBlocks * 512);
+        uint16_t* dst = reinterpret_cast<uint16_t*>(extraData.data() + layer.subpixelWeightOffset);
+
+        for (int kc = 0; kc < numChunks0; ++kc)
+          for (int py = 0; py < 2; ++py)
+            for (int px = 0; px < 2; ++px)
+              for (int t = 0; t < 4; ++t)
+                for (int nb = 0; nb < NB; ++nb)
+                {
+                  const int ty = t >> 1, tx = t & 1;
+                  uint16_t* block = dst + ((((size_t(kc) * 4 + py * 2 + px) * 4 + t) * NB) + nb) * 256;
+                  for (int e = 0; e < 256; ++e)
+                  {
+                    float sum = 0.f;
+                    for (int ky = tapBegin[py][ty]; ky < tapEnd[py][ty]; ++ky)
+                      for (int kx = tapBegin[px][tx]; kx < tapEnd[px][tx]; ++kx)
+                        sum += halfToFloat(srcBlock(kc, ky * 3 + kx, nb)[e]);
+                    block[e] = floatToHalf(sum);
+                  }
+                }
+
+        const size_t base = size_t(numChunks0) * 16 * NB;
+        for (int kc1 = 0; kc1 < numChunks1; ++kc1)
+          for (int tap = 0; tap < 9; ++tap)
+            for (int nb = 0; nb < NB; ++nb)
+              memcpy(dst + (base + (size_t(kc1) * 9 + tap) * NB + nb) * 256,
+                     srcBlock(numChunks0 + kc1, tap, nb), 512);
+      }
+
+      // Experimental coopmat2: [tap][K][N] f16 weights and [N] f32 bias
       for (Layer& layer : layers)
       {
         if (!layer.cm2)
@@ -538,9 +661,9 @@ namespace vkoidn {
         const uint16_t* src = reinterpret_cast<const uint16_t*>(data + layer.desc.weightOffset);
         const float* bias = reinterpret_cast<const float*>(data + layer.desc.biasF32Offset);
 
-        layer.cm2WeightOffset = roundUp(cm2Data.size(), memoryAlignment);
-        cm2Data.resize(layer.cm2WeightOffset + size_t(9) * K * N * 2);
-        uint16_t* dstW = reinterpret_cast<uint16_t*>(cm2Data.data() + layer.cm2WeightOffset);
+        layer.cm2WeightOffset = roundUp(extraData.size(), memoryAlignment);
+        extraData.resize(layer.cm2WeightOffset + size_t(9) * K * N * 2);
+        uint16_t* dstW = reinterpret_cast<uint16_t*>(extraData.data() + layer.cm2WeightOffset);
         for (uint32_t kc = 0; kc < K / 16; ++kc)
           for (uint32_t tap = 0; tap < 9; ++tap)
             for (uint32_t nb = 0; nb < NB; ++nb)
@@ -549,21 +672,21 @@ namespace vkoidn {
                   dstW[(size_t(tap) * K + kc * 16 + ic) * N + nb * 16 + oc] =
                     src[((size_t(kc) * 9 + tap) * NB + nb) * 256 + ic * 16 + oc];
 
-        layer.cm2BiasOffset = roundUp(cm2Data.size(), memoryAlignment);
-        cm2Data.resize(layer.cm2BiasOffset + size_t(N) * 4);
-        float* dstB = reinterpret_cast<float*>(cm2Data.data() + layer.cm2BiasOffset);
+        layer.cm2BiasOffset = roundUp(extraData.size(), memoryAlignment);
+        extraData.resize(layer.cm2BiasOffset + size_t(N) * 4);
+        float* dstB = reinterpret_cast<float*>(extraData.data() + layer.cm2BiasOffset);
         for (uint32_t n = 0; n < N; ++n)
           dstB[n] = bias[(n / 16) * 256 + (n % 16)]; // first row of the replicated bias
       }
 
-      if (!cm2Data.empty())
+      if (!extraData.empty())
       {
-        if ((result = ctx.createBuffer(cm2Data.size(), false, cm2Buffer)) != Result::Success ||
-            (result = ctx.createBuffer(cm2Data.size(), true, cm2Staging)) != Result::Success)
+        if ((result = ctx.createBuffer(extraData.size(), false, extraBuffer)) != Result::Success ||
+            (result = ctx.createBuffer(extraData.size(), true, extraStaging)) != Result::Success)
           return result;
-        memcpy(cm2Staging.mapped, cm2Data.data(), cm2Data.size());
-        VkBufferCopy cm2Region{0, 0, cm2Data.size()};
-        ctx.getFuncs().vkCmdCopyBuffer(cmd, cm2Staging.buffer, cm2Buffer.buffer, 1, &cm2Region);
+        memcpy(extraStaging.mapped, extraData.data(), extraData.size());
+        VkBufferCopy extraRegion{0, 0, extraData.size()};
+        ctx.getFuncs().vkCmdCopyBuffer(cmd, extraStaging.buffer, extraBuffer.buffer, 1, &extraRegion);
       }
     }
 
@@ -815,10 +938,12 @@ namespace vkoidn {
           conv.src1 = (layer.src1 >= 0) ? scratch + tensors[layer.src1].offset : 0;
           conv.weight = weightBuffer.address + layer.desc.weightOffset;
           conv.bias = weightBuffer.address + (accF16 ? layer.desc.biasF16Offset : layer.desc.biasF32Offset);
+          if (layer.subpixel)
+            conv.weight = extraBuffer.address + layer.subpixelWeightOffset;
           if (layer.cm2)
           {
-            conv.weight = cm2Buffer.address + layer.cm2WeightOffset;
-            conv.bias = cm2Buffer.address + layer.cm2BiasOffset;
+            conv.weight = extraBuffer.address + layer.cm2WeightOffset;
+            conv.bias = extraBuffer.address + layer.cm2BiasOffset;
           }
           conv.dst = scratch + tensors[layer.dst].offset;
           conv.H = layer.convH;

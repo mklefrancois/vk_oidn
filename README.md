@@ -80,17 +80,18 @@ command-line tool: `vk_oidn_denoise_test --hdr color.pfm --alb albedo.pfm --nrm 
 image views instead of buffers).
 
 Validation: on 22 configurations (HDR/LDR/sRGB, albedo/normal/clean aux, all qualities, half
-images, fixed input scale, tiled), the output is bit-identical to the Vulkan backend of the OIDN
-fork and matches the OIDN CPU reference. The validation layer reports no errors.
+images, fixed input scale, tiled), the output matches the OIDN CPU reference (as accurately as
+OIDN's CUDA backend), and is bit-identical to the Vulkan backend of the OIDN fork when the
+sub-pixel optimization is disabled. The validation layer reports no errors.
 
 GPU time on an NVIDIA RTX PRO 4500 Blackwell (hdr + albedo + normal):
 
 | Resolution | Quality | vk_oidn   | OIDN 2.5.1 CUDA |
 |------------|---------|-----------|-----------------|
-| 1920x1080  | high    | 7.31 ms   | 8.10 ms         |
-| 1920x1080  | fast    | 3.95 ms   | 5.55 ms         |
-| 3840x2160  | high    | 30.30 ms  | 34.65 ms        |
-| 3840x2160  | fast    | 16.09 ms  | 23.41 ms        |
+| 1920x1080  | high    | 6.72 ms   | 8.10 ms         |
+| 1920x1080  | fast    | 3.65 ms   | 5.55 ms         |
+| 3840x2160  | high    | 27.83 ms  | 34.65 ms        |
+| 3840x2160  | fast    | 14.63 ms  | 23.41 ms        |
 
 ## Building
 
@@ -132,6 +133,7 @@ both choices were measurably faster (full front-end unrolling was ~20% slower).
 | `VK_OIDN_PROFILE=1`  | print per-layer GPU times when the denoiser is destroyed             |
 | `VK_OIDN_COOPMAT=0/1`| disable / force cooperative matrices (default: NVIDIA only)          |
 | `VK_OIDN_CM2=1`      | experimental `VK_NV_cooperative_matrix2` convolutions (slower, see the docs) |
+| `VK_OIDN_SUBPIXEL=0` | disable the sub-pixel decomposition of the upsampling layers          |
 
 ## Weights
 

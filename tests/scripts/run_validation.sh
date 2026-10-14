@@ -6,7 +6,8 @@
 #   - compares the output with the Open Image Denoise CPU device (reference), using the same
 #     average relative error (SMAPE) and outlier criteria as oidnDenoise
 #   - optionally checks that the output is bit-identical to the Vulkan backend of the OIDN fork
-#     running the same Slang kernels (OIDN_VULKAN_KERNEL_DIR)
+#     running the same Slang kernels (OIDN_VULKAN_KERNEL_DIR); since the fork has no sub-pixel
+#     decomposition of the upsampling layers, this compares a vk_oidn run with VK_OIDN_SUBPIXEL=0
 #   - optionally checks that image view inputs/outputs give the same result as buffers
 #
 # Usage:
@@ -52,7 +53,8 @@ run() {
   local identical=""
   if [ -n "$FORK" ]; then
     OIDN_VULKAN_KERNEL_DIR="$SPV_DIR" "$FORK" -d vulkan "$@" -o "fork_$name.pfm" > /dev/null 2>&1
-    if cmp -s "sdk_$name.pfm" "fork_$name.pfm"; then
+    VK_OIDN_SUBPIXEL=0 "$TEST" "$@" $EXTRA -o "sdk_nosubpixel_$name.pfm" > /dev/null 2>&1
+    if cmp -s "sdk_nosubpixel_$name.pfm" "fork_$name.pfm"; then
       identical="| bit-identical to OIDN fork"
     else
       identical="| DIFFERS from OIDN fork"
