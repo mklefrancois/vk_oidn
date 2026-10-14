@@ -20,6 +20,7 @@
 #   OIDN_FORK_DENOISE path to oidnDenoise of the OIDN fork with the Vulkan device (optional)
 #   VK_OIDN_SPV_DIR   directory of the compiled vk_oidn kernels (default: build/spv), loaded by
 #                     the OIDN fork for the bit-identity check
+#   VK_OIDN_TEST_ARGS extra options for vk_oidn_denoise_test (e.g. --validation)
 #
 # The images can be generated with gen_images.py.
 
@@ -30,6 +31,7 @@ TEST="${VK_OIDN_TEST:-$ROOT_DIR/build/vk_oidn_denoise_test}"
 SPV_DIR="${VK_OIDN_SPV_DIR:-$ROOT_DIR/build/spv}"
 REF="${OIDN_REF_DENOISE:-}"
 FORK="${OIDN_FORK_DENOISE:-}"
+TEST_ARGS="${VK_OIDN_TEST_ARGS:-}"
 
 IMG_DIR="$1"
 EXTRA="${2:-}"
@@ -46,9 +48,14 @@ run() {
     "$REF" -d cpu "$@" -o "ref_$name.pfm" > /dev/null 2>&1
   fi
 
-  local result
-  result=$("$TEST" "$@" $EXTRA -o "sdk_$name.pfm" -r "ref_$name.pfm" 2>&1 | grep -E "Compare|Error|alpha" | tr '\n' ' ')
-  echo "$result" | grep -q -- "-> OK" || failures=$((failures+1))
+  local output status result
+  output=$("$TEST" "$@" $EXTRA $TEST_ARGS -o "sdk_$name.pfm" -r "ref_$name.pfm" 2>&1)
+  status=$?
+  result=$(echo "$output" | grep -E "Compare|Error:|alpha|Validation errors" | tr '\n' ' ')
+  if [ $status -ne 0 ] || ! echo "$result" | grep -q -- "-> OK"; then
+    failures=$((failures+1))
+    echo "$output" | grep "^\[validation" | head -5
+  fi
 
   local identical=""
   if [ -n "$FORK" ]; then

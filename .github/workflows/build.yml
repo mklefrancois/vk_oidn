@@ -1,0 +1,122 @@
+name: Build
+
+# Builds vk_oidn on Windows and Linux with the Vulkan SDK (which provides slangc).
+# On Linux, the denoiser is also validated on lavapipe (Mesa's CPU Vulkan driver) against the
+# official Open Image Denoise CPU device, with the Khronos validation layer enabled.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Same SDK as vk_gltf_renderer; its slangc is the compiler the kernels are tested with
+  VULKAN_SDK_VERSION: 1.4.363.0
+  # Official Open Image Denoise release used to create the reference images
+  OIDN_VERSION: 2.5.1
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: ubuntu-latest
+            platform: linux-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout vk_oidn
+        uses: actions/checkout@v4
+
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/windows/vulkan_sdk.exe"
+          Write-Host "Downloading Vulkan SDK from $url"
+          Invoke-WebRequest -Uri $url -OutFile vulkan_sdk.exe
+          Write-Host "Installing Vulkan SDK..."
+          Start-Process -FilePath .\vulkan_sdk.exe -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait
+          $sdkPath = "C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}"
+          echo "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
+          echo "$sdkPath\Bin" >> $env:GITHUB_PATH
+
+      - name: Install Vulkan SDK (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          SDK_URL="https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/linux/vulkan_sdk.tar.xz"
+          echo "Downloading Vulkan SDK from $SDK_URL"
+          mkdir -p "$HOME/vulkan_sdk"
+          cd "$HOME/vulkan_sdk"
+          wget -q -O vulkan_sdk.tar.xz "$SDK_URL"
+          tar -xf vulkan_sdk.tar.xz
+          rm vulkan_sdk.tar.xz
+          SDK_ROOT="$HOME/vulkan_sdk/${{ env.VULKAN_SDK_VERSION }}/x86_64"
+          if [ ! -d "$SDK_ROOT" ]; then
+            echo "ERROR: expected SDK root not found at $SDK_ROOT" >&2
+            ls "$HOME/vulkan_sdk/${{ env.VULKAN_SDK_VERSION }}" >&2 || true
+            exit 1
+          fi
+          echo "VULKAN_SDK=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$SDK_ROOT/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=$SDK_ROOT/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+          echo "Installed Vulkan SDK at: $SDK_ROOT"
+
+      # libvulkan-dev: the Vulkan loader that CMake's FindVulkan needs (the SDK 1.4.350+ moved
+      # its loader to a folder CMake does not search). mesa-vulkan-drivers: lavapipe.
+      # python3-numpy: generates the test images.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libvulkan-dev mesa-vulkan-drivers python3-numpy
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: >
+          cmake -S . -B build -A x64
+          -DVK_OIDN_BUILD_TESTS=ON
+          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+
+      - name: Configure (Linux)
+        if: runner.os == 'Linux'
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DVK_OIDN_BUILD_TESTS=ON
+          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+          "-DCMAKE_CXX_FLAGS=-Wall -Wextra -Wno-missing-field-initializers"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      # Functional validation on lavapipe (no GPU on the runners): 11 configurations, with buffers
+      # and with storage image views, compared to the OIDN CPU device, with the validation layer
+      - name: Validate denoising on lavapipe (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          OIDN_DIR="$HOME/oidn"
+          mkdir -p "$OIDN_DIR"
+          wget -q -O - "https://github.com/RenderKit/oidn/releases/download/v${OIDN_VERSION}/oidn-${OIDN_VERSION}.x86_64.linux.tar.gz" | tar -xz -C "$OIDN_DIR"
+          export OIDN_REF_DENOISE="$OIDN_DIR/oidn-${OIDN_VERSION}.x86_64.linux/bin/oidnDenoise"
+          export VK_OIDN_TEST="$PWD/build/vk_oidn_denoise_test"
+          export VK_OIDN_TEST_ARGS="--validation"
+          export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+
+          IMG="$RUNNER_TEMP/images"
+          python3 tests/scripts/gen_images.py "$IMG" 201 123
+          echo "== Buffers =="
+          bash tests/scripts/run_validation.sh "$IMG"
+          echo "== Storage image views =="
+          bash tests/scripts/run_validation.sh "$IMG" --images

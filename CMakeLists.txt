@@ -20,7 +20,19 @@ find_program(VK_OIDN_SLANGC slangc
 if(NOT VK_OIDN_SLANGC)
   message(FATAL_ERROR "slangc not found, please install the Vulkan SDK or set VK_OIDN_SLANGC")
 endif()
-message(STATUS "vk_oidn: using Slang compiler ${VK_OIDN_SLANGC}")
+
+# The kernels need a recent Slang compiler (-denorm-mode-fp16). Older versions, such as the slangc
+# of some Linux distribution packages, do not have it. The version string is not reliable across
+# packages, so the option itself is checked.
+execute_process(COMMAND ${VK_OIDN_SLANGC} -h OUTPUT_VARIABLE slangc_help ERROR_VARIABLE slangc_help)
+if(NOT slangc_help MATCHES "denorm-mode-fp16")
+  message(FATAL_ERROR "vk_oidn: ${VK_OIDN_SLANGC} is too old (no -denorm-mode-fp16 option). "
+                      "Install a recent Vulkan SDK (tested with 1.4.363, Slang 2026.17) and set VULKAN_SDK, "
+                      "or set VK_OIDN_SLANGC to a recent slangc (https://github.com/shader-slang/slang/releases)")
+endif()
+execute_process(COMMAND ${VK_OIDN_SLANGC} -version OUTPUT_VARIABLE slangc_version ERROR_VARIABLE slangc_version
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_STRIP_TRAILING_WHITESPACE)
+message(STATUS "vk_oidn: using Slang compiler ${VK_OIDN_SLANGC} (${slangc_version})")
 
 add_library(vk_oidn STATIC
   include/vk_oidn/vk_oidn.h

@@ -19,6 +19,20 @@
 #define VK_CHECK(x) \
   do { VkResult r = (x); if (r != VK_SUCCESS) throw std::runtime_error(std::string(#x) + " failed: " + std::to_string(r)); } while (0)
 
+// Number of errors reported by the validation layer (--validation)
+static int g_validationErrors = 0;
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                                                    VkDebugUtilsMessageTypeFlagsEXT,
+                                                    const VkDebugUtilsMessengerCallbackDataEXT* data, void*)
+{
+  const bool error = severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+  if (error)
+    ++g_validationErrors;
+  fprintf(stderr, "[validation %s] %s\n", error ? "error" : "warning", data->pMessage);
+  return VK_FALSE;
+}
+
 // -------------------------------------------------------------------------------------------------
 // Images
 // -------------------------------------------------------------------------------------------------
@@ -149,6 +163,7 @@ struct Buffer
 struct App
 {
   VkInstance instance = VK_NULL_HANDLE;
+  VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
   VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
@@ -158,14 +173,45 @@ struct App
   VkPhysicalDeviceMemoryProperties memProps{};
   float timestampPeriod = 1.f;
 
-  void init(int deviceIndex)
+  void init(int deviceIndex, bool validation)
   {
     VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     appInfo.pApplicationName = "vk_oidn_denoise_test";
     appInfo.apiVersion = VK_API_VERSION_1_3;
     VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     instanceInfo.pApplicationInfo = &appInfo;
+
+    // Optional Khronos validation layer: errors make the test fail
+    const char* layer = "VK_LAYER_KHRONOS_validation";
+    const char* debugExtension = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    VkDebugUtilsMessengerCreateInfoEXT messengerInfo{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+    messengerInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    messengerInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT;
+    messengerInfo.pfnUserCallback = debugCallback;
+    if (validation)
+    {
+      uint32_t numLayers = 0;
+      vkEnumerateInstanceLayerProperties(&numLayers, nullptr);
+      std::vector<VkLayerProperties> layers(numLayers);
+      vkEnumerateInstanceLayerProperties(&numLayers, layers.data());
+      bool found = false;
+      for (const VkLayerProperties& l : layers)
+        found |= strcmp(l.layerName, layer) == 0;
+      if (!found)
+        throw std::runtime_error("VK_LAYER_KHRONOS_validation not found (install the Vulkan SDK or set VK_LAYER_PATH)");
+      instanceInfo.enabledLayerCount = 1;
+      instanceInfo.ppEnabledLayerNames = &layer;
+      instanceInfo.enabledExtensionCount = 1;
+      instanceInfo.ppEnabledExtensionNames = &debugExtension;
+      instanceInfo.pNext = &messengerInfo; // also reports instance creation and destruction
+    }
     VK_CHECK(vkCreateInstance(&instanceInfo, nullptr, &instance));
+    if (validation)
+    {
+      auto createMessenger = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+        vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
+      VK_CHECK(createMessenger(instance, &messengerInfo, nullptr, &messenger));
+    }
 
     uint32_t count = 0;
     vkEnumeratePhysicalDevices(instance, &count, nullptr);
@@ -260,8 +306,17 @@ struct App
       vkDestroyCommandPool(device, commandPool, nullptr);
       vkDestroyDevice(device, nullptr);
     }
+    if (messenger)
+    {
+      auto destroyMessenger = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+        vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
+      destroyMessenger(instance, messenger, nullptr);
+    }
     if (instance)
       vkDestroyInstance(instance, nullptr);
+    device = VK_NULL_HANDLE;
+    messenger = VK_NULL_HANDLE;
+    instance = VK_NULL_HANDLE;
   }
 
   Buffer createBuffer(size_t byteSize, bool hostVisible)
@@ -415,7 +470,8 @@ static void printUsage()
          "                            [--srgb] [--clean_aux] [-q high|balanced|fast] [-t float|half]\n"
          "                            [--is inputScale] [--maxmem MB] [-o output.pfm] [-r ref.pfm]\n"
          "                            [--maxerror e] [-n benchmarkRuns] [-d deviceIndex]\n"
-         "                            [--images] (use RGBA storage image views instead of buffers)\n");
+         "                            [--images] (use RGBA storage image views instead of buffers)\n"
+         "                            [--validation] (Khronos validation layer, fails on errors)\n");
 }
 
 int main(int argc, char* argv[])
@@ -427,6 +483,7 @@ int main(int argc, char* argv[])
     vkoidn::DenoiserCreateInfo createInfo;
     bool half = false;
     bool useImages = false;
+    bool validation = false;
     float inputScale = std::numeric_limits<float>::quiet_NaN();
     double maxError = 0.003;
     int numRuns = 0, deviceIndex = -1;
@@ -456,6 +513,7 @@ int main(int argc, char* argv[])
       else if (arg == "-n")          numRuns = std::stoi(next());
       else if (arg == "-d")          deviceIndex = std::stoi(next());
       else if (arg == "--images")    useImages = true;
+      else if (arg == "--validation") validation = true;
       else { printUsage(); return 1; }
     }
     if (colorPath.empty()) { printUsage(); return 1; }
@@ -471,7 +529,7 @@ int main(int argc, char* argv[])
     createInfo.normal = !normalPath.empty();
 
     // Vulkan
-    app.init(deviceIndex);
+    app.init(deviceIndex, validation);
 
     vkoidn::ContextCreateInfo contextInfo;
     contextInfo.instance = app.instance;
@@ -679,6 +737,12 @@ int main(int argc, char* argv[])
     }
 
     app.destroy();
+    if (validation)
+    {
+      printf("Validation errors: %d -> %s\n", g_validationErrors, g_validationErrors == 0 ? "OK" : "FAILED");
+      if (g_validationErrors != 0)
+        exitCode = 1;
+    }
     return exitCode;
   }
   catch (const std::exception& e)
