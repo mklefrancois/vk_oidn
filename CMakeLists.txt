@@ -40,6 +40,9 @@ target_include_directories(vk_oidn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(vk_oidn PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(vk_oidn PUBLIC Vulkan::Headers)
 target_compile_definitions(vk_oidn PRIVATE VK_NO_PROTOTYPES) # functions are loaded at runtime
+if(MSVC)
+  target_compile_definitions(vk_oidn PRIVATE _CRT_SECURE_NO_WARNINGS) # getenv() for the debug variables
+endif()
 
 # Kernels: <name>|<entry point>|<comma-separated defines>
 # Each kernel is compiled with float controls (FP16 round-to-nearest-even and denormal
