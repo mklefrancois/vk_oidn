@@ -1,0 +1,10 @@
+vk_oidn
+Copyright 2026 NVIDIA Corporation
+
+This product is derived from Intel(R) Open Image Denoise
+(https://github.com/RenderKit/oidn), Copyright 2018 Intel Corporation,
+licensed under the Apache License, Version 2.0.
+
+The trained neural network weights are from the Open Image Denoise weights
+repository (https://github.com/RenderKit/oidn-weights), Copyright Intel
+Corporation, licensed under the Apache License, Version 2.0.

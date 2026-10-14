@@ -1,0 +1,11 @@
+# Build directories
+build*/
+out/
+
+# Generated files
+*.spv
+
+# IDE
+.vs/
+.vscode/
+*.user
