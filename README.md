@@ -33,6 +33,13 @@ cmake -S . -B build
 cmake --build build --config Release
 ```
 
+## Weights
+
+The `weights/` folder contains the Open Image Denoise `RT` filter weights converted to a
+GPU-ready format by `tools/pack_weights.py` (layer graph + FP16 weight tiles in the layout of the
+convolution kernels). They are embedded in the library by default (`VK_OIDN_EMBED_WEIGHTS`,
+requires Python 3 at build time). See [weights/README.md](weights/README.md).
+
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). Derived from Intel Open Image
