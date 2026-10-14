@@ -24,7 +24,12 @@ message(STATUS "vk_oidn: using Slang compiler ${VK_OIDN_SLANGC}")
 
 add_library(vk_oidn STATIC
   include/vk_oidn/vk_oidn.h
+  src/context.cpp
+  src/context.h
+  src/denoiser.cpp
+  src/kernel_params.h
   src/vk_oidn.cpp
+  src/vulkan_funcs.h
   src/weights.cpp
   src/weights.h
   src/weights_format.h
@@ -130,4 +135,7 @@ if(VK_OIDN_BUILD_TESTS)
   target_link_libraries(vk_oidn_weights_test PRIVATE vk_oidn)
   target_include_directories(vk_oidn_weights_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME weights COMMAND vk_oidn_weights_test ${VK_OIDN_WEIGHT_FILES})
+
+  add_executable(vk_oidn_denoise_test tests/denoise_test.cpp)
+  target_link_libraries(vk_oidn_denoise_test PRIVATE vk_oidn Vulkan::Vulkan)
 endif()

@@ -3,8 +3,6 @@
 
 // vk_oidn: lightweight Vulkan denoiser based on Intel(R) Open Image Denoise
 //
-// DRAFT API (step 1 of the SDK): declarations only, the implementation comes in later steps.
-//
 // Usage (similar to DLSS / NGX):
 //   1. Before creating the VkDevice, enable the extensions and features returned by
 //      getRequiredDeviceExtensions() and enableRequiredFeatures().
@@ -92,6 +90,9 @@ namespace vkoidn {
 
     // Whether tensor cores are used (VK_KHR_cooperative_matrix)
     virtual bool isCooperativeMatrixEnabled() const = 0;
+
+    // Name of the physical device
+    virtual const char* getDeviceName() const = 0;
   };
 
   // -----------------------------------------------------------------------------------------------
@@ -118,8 +119,13 @@ namespace vkoidn {
     Quality quality = Quality::High;
 
     // Maximum memory for intermediate data in MB; larger images are processed in tiles.
-    // 0 = no limit (single tile).
+    // 0 = default (tiles of at most 2160x2160 pixels, like Open Image Denoise).
     uint32_t maxMemoryMB = 0;
+
+    // Optional packed weights (.vkoidnw, see tools/pack_weights.py) overriding the embedded ones.
+    // The memory must remain valid until Denoiser::create() returns.
+    const void* weights = nullptr;
+    size_t weightsByteSize = 0;
   };
 
   enum class Format
@@ -171,6 +177,12 @@ namespace vkoidn {
 
     // Device memory used by the denoiser in bytes (weights + intermediate data)
     virtual uint64_t getMemoryUsage() const = 0;
+
+    // Number of tiles the image is split into (1 if the whole image is processed at once)
+    virtual uint32_t getTileCount() const = 0;
+
+    // Name of the selected network weights (e.g. "rt_hdr_alb_nrm")
+    virtual const char* getWeightsName() const = 0;
   };
 
 } // namespace vkoidn

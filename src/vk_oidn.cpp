@@ -73,18 +73,4 @@ namespace vkoidn {
       coopMatFeatures->cooperativeMatrix = VK_TRUE;
   }
 
-  // TODO (step 4): implementation of Context and Denoiser
-  Result Context::create(const ContextCreateInfo& createInfo, std::unique_ptr<Context>& context)
-  {
-    context.reset();
-    return Result::ErrorUnsupportedDevice;
-  }
-
-  Result Denoiser::create(Context& context, VkCommandBuffer cmd, const DenoiserCreateInfo& createInfo,
-                          std::unique_ptr<Denoiser>& denoiser)
-  {
-    denoiser.reset();
-    return Result::ErrorUnsupportedDevice;
-  }
-
 } // namespace vkoidn
