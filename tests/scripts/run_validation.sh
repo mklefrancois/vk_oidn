@@ -54,7 +54,8 @@ run() {
   result=$(echo "$output" | grep -E "Compare|Error:|alpha|Validation errors" | tr '\n' ' ')
   if [ $status -ne 0 ] || ! echo "$result" | grep -q -- "-> OK"; then
     failures=$((failures+1))
-    echo "$output" | grep "^\[validation" | head -5
+    echo "$name: exit code $status, last output lines:"
+    echo "$output" | tail -n 8 | sed 's/^/    /'
   fi
 
   local identical=""

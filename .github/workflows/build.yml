@@ -78,6 +78,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build libvulkan-dev mesa-vulkan-drivers python3-numpy
+          dpkg -s mesa-vulkan-drivers | grep -E "^Version"
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
