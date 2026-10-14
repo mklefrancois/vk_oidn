@@ -112,7 +112,11 @@ jobs:
           export OIDN_REF_DENOISE="$OIDN_DIR/oidn-${OIDN_VERSION}.x86_64.linux/bin/oidnDenoise"
           export VK_OIDN_TEST="$PWD/build/vk_oidn_denoise_test"
           export VK_OIDN_TEST_ARGS="--validation"
-          export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          # Use lavapipe only (its manifest name depends on the Mesa package)
+          ls /usr/share/vulkan/icd.d/
+          VK_DRIVER_FILES="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)"
+          export VK_DRIVER_FILES
+          echo "Vulkan driver: $VK_DRIVER_FILES"
 
           IMG="$RUNNER_TEMP/images"
           python3 tests/scripts/gen_images.py "$IMG" 201 123
