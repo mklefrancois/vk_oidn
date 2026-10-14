@@ -125,3 +125,20 @@ jobs:
           bash tests/scripts/run_validation.sh "$IMG"
           echo "== Storage image views =="
           bash tests/scripts/run_validation.sh "$IMG" --images
+
+      # TEMPORARY: investigate the lavapipe crash of the configurations without autoexposure
+      - name: Debug crash (Linux)
+        if: failure() && runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y gdb > /dev/null
+          export VK_DRIVER_FILES="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)"
+          IMG="$RUNNER_TEMP/images"
+          T="$PWD/build/vk_oidn_denoise_test"
+          echo "== without validation layer =="
+          stdbuf -o0 "$T" --hdr "$IMG/color.pfm" --is 0.5 || echo "exit $?"
+          echo "== color only, --is 1 =="
+          stdbuf -o0 "$T" --hdr "$IMG/color.pfm" --is 1 || echo "exit $?"
+          echo "== VK_OIDN_SUBPIXEL=0 =="
+          VK_OIDN_SUBPIXEL=0 stdbuf -o0 "$T" --hdr "$IMG/color.pfm" --is 0.5 || echo "exit $?"
+          echo "== gdb backtrace =="
+          gdb -batch -ex run -ex "bt 25" -ex "info threads" --args "$T" --hdr "$IMG/color.pfm" --is 0.5 2>&1 | tail -60
