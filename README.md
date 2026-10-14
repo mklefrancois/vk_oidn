@@ -11,6 +11,11 @@ never submits work or waits on the host.
 - Inputs and outputs as buffers (device addresses) or storage image views.
 - Pre-packed network weights embedded in the library (no runtime file loading).
 
+**Documentation:**
+[architecture](docs/architecture.md) (how it works, with diagrams) ·
+[validation and performance](docs/validation_and_performance.md) (all measurements and how they
+were made, issues found, experiments).
+
 > **Status: work in progress.** This repository is being built step by step:
 >
 > 1. [x] Repository skeleton, license, draft API (`include/vk_oidn/vk_oidn.h`)
@@ -67,7 +72,9 @@ inputs.outputView = {outputView, VK_FORMAT_R16G16B16A16_SFLOAT}; // format: exac
 denoiser->cmdDenoise(cmd, inputs);
 ```
 
-See [`tests/denoise_test.cpp`](tests/denoise_test.cpp) for a complete example. It is also a
+See [`tests/denoise_test.cpp`](tests/denoise_test.cpp) for a complete example. The validation
+can be reproduced with [`tests/scripts`](tests/scripts) (image generator and validation script, see
+the [validation document](docs/validation_and_performance.md)). It is also a
 command-line tool: `vk_oidn_denoise_test --hdr color.pfm --alb albedo.pfm --nrm normal.pfm -o out.pfm`
 (`-r ref.pfm` compares with a reference, `-n 50` measures the GPU time, `--images` uses storage
 image views instead of buffers).
@@ -117,6 +124,14 @@ Performance on an NVIDIA RTX PRO 4500 Blackwell (`oidnBenchmark`, RT hdr+alb+nrm
 
 Notes: the kernels are compiled with `-O1` and use `[unroll]` hints rather than `[ForceUnroll]`;
 both choices were measurably faster (full front-end unrolling was ~20% slower).
+
+## Debugging environment variables
+
+| Variable             | Description                                                          |
+|----------------------|----------------------------------------------------------------------|
+| `VK_OIDN_PROFILE=1`  | print per-layer GPU times when the denoiser is destroyed             |
+| `VK_OIDN_COOPMAT=0/1`| disable / force cooperative matrices (default: NVIDIA only)          |
+| `VK_OIDN_CM2=1`      | experimental `VK_NV_cooperative_matrix2` convolutions (slower, see the docs) |
 
 ## Weights
 
