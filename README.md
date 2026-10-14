@@ -95,12 +95,26 @@ GPU time on an NVIDIA RTX PRO 4500 Blackwell (hdr + albedo + normal):
 
 ## Building
 
-Requires CMake 3.21+, a C++17 compiler, Python 3 and the Vulkan SDK (headers and `slangc`).
+[![Build](https://github.com/mklefrancois/vk_oidn/actions/workflows/build.yml/badge.svg)](https://github.com/mklefrancois/vk_oidn/actions/workflows/build.yml)
+
+Windows and Linux. Requires CMake 3.21+, a C++17 compiler, Python 3 and the
+[Vulkan SDK](https://vulkan.lunarg.com/sdk/home) (headers and `slangc`; tested with 1.4.363.0,
+Slang 2026.17). On Linux, the Vulkan loader library is also needed (`libvulkan-dev`).
 
 ```
 cmake -S . -B build
 cmake --build build --config Release
 ```
+
+The `slangc` of some Linux distribution packages is too old for the kernels: CMake then stops
+with a message. Set `VULKAN_SDK` to the LunarG SDK (`source <sdk>/setup-env.sh`), or
+`VK_OIDN_SLANGC` to a recent `slangc` from the [Slang releases](https://github.com/shader-slang/slang/releases).
+
+Every push is built on Windows and Linux by [GitHub Actions](.github/workflows/build.yml), with
+warnings as errors. On Linux, the denoiser is also run on lavapipe (Mesa's CPU Vulkan driver) in
+11 configurations, with buffers and with image views, and compared to the official Open Image
+Denoise CPU device, with the Khronos validation layer enabled (see
+[docs/validation_and_performance.md](docs/validation_and_performance.md)).
 
 ## Shaders
 

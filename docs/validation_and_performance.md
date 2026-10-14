@@ -121,6 +121,36 @@ tests/scripts/run_validation.sh images/odd --images
 ```
 
 The bit-identity check against the fork uses a second vk_oidn run with `VK_OIDN_SUBPIXEL=0`.
+`VK_OIDN_TEST_ARGS=--validation` runs every test with the Khronos validation layer and fails on
+any validation error.
+
+### Linux and lavapipe (continuous integration)
+
+The same validation runs on Linux (Ubuntu 24.04, GCC 13, Vulkan SDK 1.4.363.0) on lavapipe,
+Mesa's CPU implementation of Vulkan (Mesa 25.2 with LLVM 20 on the GitHub runners, Mesa 24.2
+with LLVM 19 locally; no cooperative matrices, so the fallback convolution kernel is used). It uses a synthetic 201x123 image (`gen_images.py`) and the official
+Open Image Denoise 2.5.1 Linux release as the reference. All 11 configurations pass, with buffers
+and with image views, with no validation errors:
+
+| Configuration | avgerror (201x123, lavapipe) |
+|---------------|------------------------------|
+| hdr           | 0.000335 |
+| hdr_alb       | 0.000336 |
+| hdr_alb_nrm   | 0.000341 |
+| hdr_calb_cnrm | 0.000314 |
+| hdr_alb_nrm_f | 0.000346 |
+| hdr_alb_nrm_b | 0.000341 |
+| hdr_is        | 0.000479 |
+| ldr_alb_nrm   | 0.000231 |
+| ldr_srgb_an   | 0.000103 |
+| hdr_half      | 0.000340 |
+| hdr_tiled     | 0.000341 |
+
+The fast and balanced modes are as accurate as the high quality mode here because the fallback
+kernel always accumulates in FP32 (FP16 accumulation is only used by the tensor core kernels).
+The table shows the local results; the GitHub runners give the same errors to 4 digits.
+The whole run takes about 3 seconds per mode on a 32-thread CPU. The
+[GitHub Actions workflow](../.github/workflows/build.yml) runs it on every push.
 
 ### Issues found and fixed during validation
 
@@ -131,6 +161,7 @@ The bit-identity check against the fork uses a second vk_oidn run with `VK_OIDN_
 | FP16 storage image output | avgerror 0.00037 instead of 0.00034 | the rounding of the storage image format conversion is implementation-defined | round to FP16 in the shader when the output view format is FP16 |
 | Crash at process exit | segmentation fault after denoising with a progress callback | destroying the global `VkInstance` from a static destructor during DLL unload | the library-global instance of the OIDN fork is never destroyed |
 | Fresh clones of the fork | weights submodule not found | relative submodule URL | absolute URL |
+| Crash on lavapipe (Mesa 25.2) | segmentation fault with a fixed input scale or LDR input | without autoexposure the scale pointer is 0, and the driver performs the load inside the untaken uniform branch | the kernels load the scale from an always valid address, then select it (bit-identical outputs) |
 
 The KHR cooperative matrix path also produced wrong results on the AMD integrated GPU
 (RDNA2, no matrix hardware); cooperative matrices are therefore enabled by default only on NVIDIA
