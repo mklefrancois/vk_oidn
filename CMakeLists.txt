@@ -47,9 +47,12 @@ target_compile_definitions(vk_oidn PRIVATE VK_NO_PROTOTYPES) # functions are loa
 set(VK_OIDN_SHADER ${CMAKE_CURRENT_SOURCE_DIR}/shaders/vk_oidn.slang)
 set(VK_OIDN_KERNELS
   "input_process|inputProcess|"
+  "input_process_image|inputProcess|IMAGE_IO"
   "output_process|outputProcess|"
+  "output_process_image|outputProcess|IMAGE_IO"
   "image_copy|imageCopy|"
   "autoexposure_downsample|autoexposureDownsample|"
+  "autoexposure_downsample_image|autoexposureDownsample|IMAGE_IO"
   "autoexposure_reduce|autoexposureReduce|"
   "autoexposure_reduce_final|autoexposureReduceFinal|"
   "conv_simple|convSimple|"
@@ -82,7 +85,7 @@ foreach(kernel ${VK_OIDN_KERNELS})
   set(spv ${VK_OIDN_SPV_DIR}/${kernel_name}.spv)
   set(spv_nofc ${VK_OIDN_SPV_DIR}/${kernel_name}_nofc.spv)
   set(spv_tmp ${VK_OIDN_SPV_DIR}/${kernel_name}_tmp.spv)
-  set(slangc_args -target spirv -profile spirv_1_5 -O1 -warnings-disable 41012 -entry ${kernel_entry} ${define_args})
+  set(slangc_args -target spirv -profile spirv_1_5 -O1 -warnings-disable 41012 -default-image-format-unknown -entry ${kernel_entry} ${define_args})
   add_custom_command(
     OUTPUT ${spv} ${spv_nofc}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${VK_OIDN_SPV_DIR}

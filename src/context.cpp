@@ -47,6 +47,10 @@ namespace vkoidn {
       fn.vkDestroyPipeline(device, p.second, allocator);
     if (pipelineLayout)
       fn.vkDestroyPipelineLayout(device, pipelineLayout, allocator);
+    if (imagePipelineLayout)
+      fn.vkDestroyPipelineLayout(device, imagePipelineLayout, allocator);
+    if (imageSetLayout)
+      fn.vkDestroyDescriptorSetLayout(device, imageSetLayout, allocator);
   }
 
   Result ContextImpl::init(const ContextCreateInfo& createInfo)
@@ -134,6 +138,25 @@ namespace vkoidn {
     if (fn.vkCreatePipelineLayout(device, &layoutInfo, allocator, &pipelineLayout) != VK_SUCCESS)
       return Result::ErrorVulkan;
 
+    // Image views: storage images in a push descriptor set (color, albedo, normal, output)
+    if (hasExtension(createInfo, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) && fn.vkCmdPushDescriptorSetKHR)
+    {
+      VkDescriptorSetLayoutBinding bindings[4];
+      for (uint32_t i = 0; i < 4; ++i)
+        bindings[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+      VkDescriptorSetLayoutCreateInfo setLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+      setLayoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+      setLayoutInfo.bindingCount = 4;
+      setLayoutInfo.pBindings = bindings;
+      if (fn.vkCreateDescriptorSetLayout(device, &setLayoutInfo, allocator, &imageSetLayout) != VK_SUCCESS)
+        return Result::ErrorVulkan;
+
+      layoutInfo.setLayoutCount = 1;
+      layoutInfo.pSetLayouts = &imageSetLayout;
+      if (fn.vkCreatePipelineLayout(device, &layoutInfo, allocator, &imagePipelineLayout) != VK_SUCCESS)
+        return Result::ErrorVulkan;
+    }
+
     return Result::Success;
   }
 
@@ -219,8 +242,11 @@ namespace vkoidn {
   }
 
   Result ContextImpl::getPipeline(const std::string& kernelName, const std::vector<uint32_t>& specConstants,
-                                  bool requireFullSubgroups, VkPipeline& pipeline)
+                                  bool requireFullSubgroups, VkPipeline& pipeline, bool imageIO)
   {
+    if (imageIO && !imagePipelineLayout)
+      return Result::ErrorUnsupportedDevice;
+
     // Use the variant without float controls if the device does not support them
     const std::string moduleName = floatControls16 ? kernelName : kernelName + "_nofc";
 
@@ -270,7 +296,7 @@ namespace vkoidn {
       pipelineInfo.stage.pNext = &subgroupSizeInfo;
       pipelineInfo.stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
     }
-    pipelineInfo.layout = pipelineLayout;
+    pipelineInfo.layout = imageIO ? imagePipelineLayout : pipelineLayout;
 
     const VkResult vr = fn.vkCreateComputePipelines(device, pipelineCache, 1, &pipelineInfo, allocator, &pipeline);
     fn.vkDestroyShaderModule(device, module, allocator);
@@ -290,11 +316,29 @@ namespace vkoidn {
                             0, 1, &barrier, 0, nullptr, 0, nullptr);
   }
 
+  void ContextImpl::cmdPushImageViews(VkCommandBuffer cmd, const VkImageView views[4]) const
+  {
+    VkDescriptorImageInfo imageInfos[4];
+    VkWriteDescriptorSet writes[4];
+    for (uint32_t i = 0; i < 4; ++i)
+    {
+      imageInfos[i] = {VK_NULL_HANDLE, views[i], VK_IMAGE_LAYOUT_GENERAL};
+      writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      writes[i].dstBinding = i;
+      writes[i].descriptorCount = 1;
+      writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+      writes[i].pImageInfo = &imageInfos[i];
+    }
+    fn.vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, imagePipelineLayout, 0, 4, writes);
+  }
+
   void ContextImpl::cmdDispatch(VkCommandBuffer cmd, VkPipeline pipeline, const void* params, uint32_t paramsByteSize,
-                                uint32_t numGroupsX, uint32_t numGroupsY, uint32_t numGroupsZ) const
+                                uint32_t numGroupsX, uint32_t numGroupsY, uint32_t numGroupsZ,
+                                bool imageIO) const
   {
     fn.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-    fn.vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, paramsByteSize, params);
+    fn.vkCmdPushConstants(cmd, imageIO ? imagePipelineLayout : pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, paramsByteSize, params);
     fn.vkCmdDispatch(cmd, numGroupsX, numGroupsY, numGroupsZ);
     cmdComputeBarrier(cmd);
   }

@@ -57,6 +57,12 @@ namespace vkoidn {
       return params;
     }
 
+    bool isHalfFormat(VkFormat format)
+    {
+      return format == VK_FORMAT_R16G16B16A16_SFLOAT || format == VK_FORMAT_R16G16B16_SFLOAT ||
+             format == VK_FORMAT_R16G16_SFLOAT || format == VK_FORMAT_R16_SFLOAT;
+    }
+
     bool isValidImage(const BufferImage& image)
     {
       const uint32_t elementSize = (image.format == Format::Half) ? 2 : 4;
@@ -109,7 +115,8 @@ namespace vkoidn {
     // Computes the tensor shapes and the scratch memory plan for the current tile size
     size_t planMemory();
     Result createPipelines(bool accF16);
-    void cmdAutoexposure(VkCommandBuffer cmd, const ImageParams& color, uint64_t resultAddress);
+    void cmdAutoexposure(VkCommandBuffer cmd, const ImageParams& color, uint64_t resultAddress,
+                         const VkImageView* views);
 
     ContextImpl& ctx;
     DenoiserCreateInfo info;
@@ -141,6 +148,11 @@ namespace vkoidn {
     VkPipeline aeDownsamplePipeline = VK_NULL_HANDLE;
     VkPipeline aeReducePipeline = VK_NULL_HANDLE;
     VkPipeline aeReduceFinalPipeline = VK_NULL_HANDLE;
+
+    // Pipelines for image view inputs/outputs (if supported)
+    VkPipeline inputImagePipeline = VK_NULL_HANDLE;
+    VkPipeline outputImagePipeline = VK_NULL_HANDLE;
+    VkPipeline aeDownsampleImagePipeline = VK_NULL_HANDLE;
 
     // GPU memory
     GpuBuffer weightBuffer;
@@ -262,6 +274,15 @@ namespace vkoidn {
     if ((result = ctx.getPipeline("input_process", {}, false, inputPipeline)) != Result::Success ||
         (result = ctx.getPipeline("output_process", {}, false, outputPipeline)) != Result::Success)
       return result;
+
+    if (ctx.areImageViewsSupported())
+    {
+      if ((result = ctx.getPipeline("input_process_image", {}, false, inputImagePipeline, true)) != Result::Success ||
+          (result = ctx.getPipeline("output_process_image", {}, false, outputImagePipeline, true)) != Result::Success ||
+          (info.hdr &&
+           (result = ctx.getPipeline("autoexposure_downsample_image", {}, false, aeDownsampleImagePipeline, true)) != Result::Success))
+        return result;
+    }
 
     if (info.hdr)
     {
@@ -459,7 +480,8 @@ namespace vkoidn {
     return Result::Success;
   }
 
-  void DenoiserImpl::cmdAutoexposure(VkCommandBuffer cmd, const ImageParams& color, uint64_t resultAddress)
+  void DenoiserImpl::cmdAutoexposure(VkCommandBuffer cmd, const ImageParams& color, uint64_t resultAddress,
+                                     const VkImageView* views)
   {
     const int numBins = aeNumBinsH * aeNumBinsW;
     const uint64_t bins   = aeBuffer.address;
@@ -473,7 +495,13 @@ namespace vkoidn {
     downsample.srcFmt = color.fmt;
     downsample.H = H;
     downsample.W = W;
-    ctx.cmdDispatch(cmd, aeDownsamplePipeline, downsample, uint32_t(aeNumBinsW), uint32_t(aeNumBinsH), 1);
+    if (views)
+    {
+      ctx.cmdPushImageViews(cmd, views);
+      ctx.cmdDispatch(cmd, aeDownsampleImagePipeline, downsample, uint32_t(aeNumBinsW), uint32_t(aeNumBinsH), 1, true);
+    }
+    else
+      ctx.cmdDispatch(cmd, aeDownsamplePipeline, downsample, uint32_t(aeNumBinsW), uint32_t(aeNumBinsH), 1);
 
     AutoexposureReduceParams reduce{};
     reduce.bins = bins;
@@ -492,20 +520,54 @@ namespace vkoidn {
 
   Result DenoiserImpl::cmdDenoise(VkCommandBuffer cmd, const DenoiseInputs& inputs)
   {
-    if (!cmd || !isValidImage(inputs.color) || !isValidImage(inputs.output) ||
-        info.albedo != (inputs.albedo.address != 0) || info.normal != (inputs.normal.address != 0) ||
-        (info.albedo && !isValidImage(inputs.albedo)) || (info.normal && !isValidImage(inputs.normal)) ||
-        inputs.colorView.view || inputs.albedoView.view || inputs.normalView.view || inputs.outputView.view)
-      return Result::ErrorInvalidArgument; // image views are not supported yet
-
-    // Tiled denoising cannot be done in place
-    if (getTileCount() > 1 && inputs.output.address == inputs.color.address)
+    if (!cmd)
       return Result::ErrorInvalidArgument;
 
-    const ImageParams color  = getImageParams(inputs.color, info.width);
-    const ImageParams albedo = info.albedo ? getImageParams(inputs.albedo, info.width) : ImageParams();
-    const ImageParams normal = info.normal ? getImageParams(inputs.normal, info.width) : ImageParams();
-    const ImageParams output = getImageParams(inputs.output, info.width);
+    // Either image views or buffers must be used for all images
+    const bool useViews = inputs.colorView.view != VK_NULL_HANDLE;
+    const VkImageView* views = nullptr;
+    VkImageView viewArray[4] = {};
+    ImageParams color, albedo, normal, output;
+
+    if (useViews)
+    {
+      if (!ctx.areImageViewsSupported())
+        return Result::ErrorUnsupportedDevice;
+      if (!inputs.outputView.view ||
+          info.albedo != (inputs.albedoView.view != VK_NULL_HANDLE) ||
+          info.normal != (inputs.normalView.view != VK_NULL_HANDLE) ||
+          inputs.color.address || inputs.albedo.address || inputs.normal.address || inputs.output.address)
+        return Result::ErrorInvalidArgument;
+
+      // Tiled denoising cannot be done in place
+      if (getTileCount() > 1 && inputs.outputView.view == inputs.colorView.view)
+        return Result::ErrorInvalidArgument;
+
+      // Unused bindings are set to the color view to keep all descriptors valid
+      viewArray[0] = inputs.colorView.view;
+      viewArray[1] = info.albedo ? inputs.albedoView.view : inputs.colorView.view;
+      viewArray[2] = info.normal ? inputs.normalView.view : inputs.colorView.view;
+      viewArray[3] = inputs.outputView.view;
+      views = viewArray;
+      output.fmt = 3u << 24; // 3 channels
+    }
+    else
+    {
+      if (!isValidImage(inputs.color) || !isValidImage(inputs.output) ||
+          info.albedo != (inputs.albedo.address != 0) || info.normal != (inputs.normal.address != 0) ||
+          (info.albedo && !isValidImage(inputs.albedo)) || (info.normal && !isValidImage(inputs.normal)) ||
+          inputs.albedoView.view || inputs.normalView.view || inputs.outputView.view)
+        return Result::ErrorInvalidArgument;
+
+      // Tiled denoising cannot be done in place
+      if (getTileCount() > 1 && inputs.output.address == inputs.color.address)
+        return Result::ErrorInvalidArgument;
+
+      color  = getImageParams(inputs.color, info.width);
+      albedo = info.albedo ? getImageParams(inputs.albedo, info.width) : ImageParams();
+      normal = info.normal ? getImageParams(inputs.normal, info.width) : ImageParams();
+      output = getImageParams(inputs.output, info.width);
+    }
 
     // Previous executions may still access the internal resources
     ctx.cmdComputeBarrier(cmd);
@@ -518,7 +580,7 @@ namespace vkoidn {
       if (info.hdr)
       {
         inputScalePtr = aeBuffer.address + aeByteSize - memoryAlignment;
-        cmdAutoexposure(cmd, color, inputScalePtr);
+        cmdAutoexposure(cmd, color, inputScalePtr, views);
       }
     }
     else
@@ -526,6 +588,8 @@ namespace vkoidn {
     const float outputScale = (inputScale != 0.f) ? 1.f / inputScale : 0.f;
 
     const uint32_t flags = uint32_t(transfer) | (info.hdr ? 4u : 0u);
+    // Presence of the auxiliary images for the image view kernels
+    const uint32_t inputFlags = flags | (useViews && info.albedo ? 16u : 0u) | (useViews && info.normal ? 32u : 0u);
     const uint64_t scratch = scratchBuffer.address;
     const Tensor& inputTensor = tensors.front();
     const Tensor& outputTensor = tensors.back();
@@ -565,7 +629,7 @@ namespace vkoidn {
         in.dstH = inputTensor.H;
         in.dstW = inputTensor.W;
         in.dstC = inputTensor.C;
-        in.flags = flags;
+        in.flags = inputFlags;
         in.hSrcBegin = h;
         in.wSrcBegin = w;
         in.hDstBegin = alignOffsetH;
@@ -574,9 +638,11 @@ namespace vkoidn {
         in.tileW = tileW1;
         in.inputScale = inputScale;
         in.normScale = normScale;
-        ctx.cmdDispatch(cmd, inputPipeline, in,
+        if (useViews)
+          ctx.cmdPushImageViews(cmd, views);
+        ctx.cmdDispatch(cmd, useViews ? inputImagePipeline : inputPipeline, in,
                         ceilDiv(uint32_t(inputTensor.W), elementwiseGroupSizeX),
-                        ceilDiv(uint32_t(inputTensor.H), elementwiseGroupSizeY), 1);
+                        ceilDiv(uint32_t(inputTensor.H), elementwiseGroupSizeY), 1, useViews);
 
         // Convolutions
         for (const Layer& layer : layers)
@@ -614,12 +680,14 @@ namespace vkoidn {
         out.wDstBegin = w + overlapBeginW;
         out.tileH = tileH2;
         out.tileW = tileW2;
-        out.flags = flags;
+        out.flags = flags | (useViews && isHalfFormat(inputs.outputView.format) ? 64u : 0u);
         out.outputScale = outputScale;
         out.rcpNormScale = rcpNormScale;
-        ctx.cmdDispatch(cmd, outputPipeline, out,
+        if (useViews)
+          ctx.cmdPushImageViews(cmd, views);
+        ctx.cmdDispatch(cmd, useViews ? outputImagePipeline : outputPipeline, out,
                         ceilDiv(uint32_t(tileW2), elementwiseGroupSizeX),
-                        ceilDiv(uint32_t(tileH2), elementwiseGroupSizeY), 1);
+                        ceilDiv(uint32_t(tileH2), elementwiseGroupSizeY), 1, useViews);
       }
     }
 

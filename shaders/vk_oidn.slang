@@ -21,6 +21,11 @@
 //   MX       number of 16-pixel column fragments per subgroup row in convCoopMat (default 2)
 //   N_FRAGS  number of 16-channel output blocks per workgroup in convCoopMat (default 2)
 //   ACC_F16  FP16 accumulation in convCoopMat (default FP32)
+//   IMAGE_IO inputProcess, outputProcess and autoexposureDownsample access storage images
+//            (descriptor set 0 with push descriptors: binding 0 = color, 1 = albedo,
+//            2 = normal, 3 = output) instead of buffers; the presence of albedo and normal is
+//            indicated by bits 4 and 5 of the input processing flags; bit 6 of the output
+//            processing flags indicates a 16-bit float output image
 //
 // Specialization constants:
 //   0: WG_SIZE   workgroup size of convCoopMat (4 * subgroup size)
@@ -163,6 +168,62 @@ void imageStore3(uint64_t ptr, uint hByteStride, uint fmt, int h, int w, float3 
 }
 
 // -------------------------------------------------------------------------------------------------
+// Image I/O: buffers or storage images (IMAGE_IO)
+// -------------------------------------------------------------------------------------------------
+
+#if defined(IMAGE_IO)
+[[vk::binding(0, 0)]] RWTexture2D<float4> colorImage;
+[[vk::binding(1, 0)]] RWTexture2D<float4> albedoImage;
+[[vk::binding(2, 0)]] RWTexture2D<float4> normalImage;
+[[vk::binding(3, 0)]] RWTexture2D<float4> outputImage;
+#endif
+
+static const int IMAGE_COLOR  = 0;
+static const int IMAGE_ALBEDO = 1;
+static const int IMAGE_NORMAL = 2;
+
+// Loads the RGB value of a pixel of an input image (the buffer parameters are ignored for images)
+float3 loadInput(int image, uint64_t ptr, uint hByteStride, uint fmt, int h, int w)
+{
+#if defined(IMAGE_IO)
+  const int2 pos = int2(w, h);
+  if (image == IMAGE_ALBEDO)
+    return albedoImage[pos].xyz;
+  else if (image == IMAGE_NORMAL)
+    return normalImage[pos].xyz;
+  else
+    return colorImage[pos].xyz;
+#else
+  return imageLoad3(ptr, hByteStride, fmt, h, w);
+#endif
+}
+
+// Stores the RGB value of a pixel of the output image (the alpha of output images is preserved)
+void storeOutput(uint64_t ptr, uint hByteStride, uint fmt, int flags, int h, int w, float3 v)
+{
+#if defined(IMAGE_IO)
+  // Round to FP16 with round-to-nearest-even for 16-bit float images (the rounding of the
+  // storage image conversion is implementation-defined)
+  if ((flags & 64) != 0)
+    v = float3(half3(v));
+  const int2 pos = int2(w, h);
+  outputImage[pos] = float4(v, outputImage[pos].w);
+#else
+  imageStore3(ptr, hByteStride, fmt, h, w, v);
+#endif
+}
+
+// Returns whether an auxiliary input image is present
+bool hasInput(uint64_t ptr, int flags, int flag)
+{
+#if defined(IMAGE_IO)
+  return (flags & flag) != 0;
+#else
+  return ptr != 0ull;
+#endif
+}
+
+// -------------------------------------------------------------------------------------------------
 // Transfer function (must match core/color.h of Open Image Denoise)
 // -------------------------------------------------------------------------------------------------
 
@@ -291,7 +352,7 @@ void inputProcess(uint3 globalID : SV_DispatchThreadID, uniform InputProcessPara
 
     // Input
     const float inputScale = (p.inputScalePtr != 0ull) ? *(float*)p.inputScalePtr : p.inputScale;
-    float3 v = imageLoad3(p.inputPtr, p.inputHStride, p.inputFmt, hSrc, wSrc) * inputScale;
+    float3 v = loadInput(IMAGE_COLOR, p.inputPtr, p.inputHStride, p.inputFmt, hSrc, wSrc) * inputScale;
     v = clamp(nanToZero(v), snorm ? -1. : 0., hdr ? FLT_MAX : 1.);
     if (snorm)
       v = v * 0.5 + 0.5;
@@ -301,17 +362,17 @@ void inputProcess(uint3 globalID : SV_DispatchThreadID, uniform InputProcessPara
     values[2] = v.z;
 
     // Albedo
-    if (p.albedoPtr != 0ull)
+    if (hasInput(p.albedoPtr, p.flags, 16))
     {
-      const float3 a = clamp(nanToZero(imageLoad3(p.albedoPtr, p.albedoHStride, p.albedoFmt, hSrc, wSrc)), 0., 1.);
+      const float3 a = clamp(nanToZero(loadInput(IMAGE_ALBEDO, p.albedoPtr, p.albedoHStride, p.albedoFmt, hSrc, wSrc)), 0., 1.);
       values[3] = a.x;
       values[4] = a.y;
       values[5] = a.z;
 
       // Normal
-      if (p.normalPtr != 0ull)
+      if (hasInput(p.normalPtr, p.flags, 32))
       {
-        float3 n = clamp(nanToZero(imageLoad3(p.normalPtr, p.normalHStride, p.normalFmt, hSrc, wSrc)), -1., 1.);
+        float3 n = clamp(nanToZero(loadInput(IMAGE_NORMAL, p.normalPtr, p.normalHStride, p.normalFmt, hSrc, wSrc)), -1., 1.);
         n = n * 0.5 + 0.5;
         values[6] = n.x;
         values[7] = n.y;
@@ -405,7 +466,7 @@ void outputProcess(uint3 globalID : SV_DispatchThreadID, uniform OutputProcessPa
     outputScale = (inputScale != 0.) ? (1. / inputScale) : 0.;
   }
 
-  imageStore3(p.dst, p.dstHStride, p.dstFmt, hDst, wDst, v * outputScale);
+  storeOutput(p.dst, p.dstHStride, p.dstFmt, p.flags, hDst, wDst, v * outputScale);
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -482,7 +543,7 @@ void autoexposureDownsample(uint3 groupID : SV_GroupID, uint3 localID : SV_Group
   float L = 0.;
   if (h < endH && w < endW)
   {
-    const float3 c = clamp(nanToZero(imageLoad3(p.src, p.srcHStride, p.srcFmt, h, w)), 0., FLT_MAX);
+    const float3 c = clamp(nanToZero(loadInput(IMAGE_COLOR, p.src, p.srcHStride, p.srcFmt, h, w)), 0., FLT_MAX);
     L = luminance(c);
   }
 

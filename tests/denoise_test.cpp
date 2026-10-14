@@ -291,6 +291,69 @@ struct App
     b = Buffer();
   }
 
+  struct ImageResource
+  {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+  };
+
+  // Storage image (RGBA) usable by vk_oidn
+  ImageResource createImage(uint32_t width, uint32_t height, VkFormat format)
+  {
+    ImageResource res;
+    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = format;
+    info.extent = {width, height, 1};
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VK_CHECK(vkCreateImage(device, &info, nullptr, &res.image));
+    VkMemoryRequirements reqs;
+    vkGetImageMemoryRequirements(device, res.image, &reqs);
+    uint32_t type = UINT32_MAX;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount && type == UINT32_MAX; ++i)
+      if ((reqs.memoryTypeBits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+        type = i;
+    VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocInfo.allocationSize = reqs.size;
+    allocInfo.memoryTypeIndex = type;
+    VK_CHECK(vkAllocateMemory(device, &allocInfo, nullptr, &res.memory));
+    VK_CHECK(vkBindImageMemory(device, res.image, res.memory, 0));
+    VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    viewInfo.image = res.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = format;
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VK_CHECK(vkCreateImageView(device, &viewInfo, nullptr, &res.view));
+    return res;
+  }
+
+  void destroyImage(ImageResource& r)
+  {
+    vkDestroyImageView(device, r.view, nullptr);
+    vkDestroyImage(device, r.image, nullptr);
+    vkFreeMemory(device, r.memory, nullptr);
+    r = ImageResource();
+  }
+
+  static void toGeneralLayout(VkCommandBuffer cmd, VkImage image)
+  {
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &b);
+  }
+
   VkCommandBuffer beginCommands()
   {
     VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -335,7 +398,8 @@ static void printUsage()
   printf("usage: vk_oidn_denoise_test (--hdr|--ldr) color.pfm [--alb albedo.pfm] [--nrm normal.pfm]\n"
          "                            [--srgb] [--clean_aux] [-q high|balanced|fast] [-t float|half]\n"
          "                            [--is inputScale] [--maxmem MB] [-o output.pfm] [-r ref.pfm]\n"
-         "                            [--maxerror e] [-n benchmarkRuns] [-d deviceIndex]\n");
+         "                            [--maxerror e] [-n benchmarkRuns] [-d deviceIndex]\n"
+         "                            [--images] (use RGBA storage image views instead of buffers)\n");
 }
 
 int main(int argc, char* argv[])
@@ -346,6 +410,7 @@ int main(int argc, char* argv[])
     std::string colorPath, albedoPath, normalPath, outputPath, refPath;
     vkoidn::DenoiserCreateInfo createInfo;
     bool half = false;
+    bool useImages = false;
     float inputScale = std::numeric_limits<float>::quiet_NaN();
     double maxError = 0.003;
     int numRuns = 0, deviceIndex = -1;
@@ -374,6 +439,7 @@ int main(int argc, char* argv[])
       else if (arg == "--maxerror")  maxError = std::stod(next());
       else if (arg == "-n")          numRuns = std::stoi(next());
       else if (arg == "-d")          deviceIndex = std::stoi(next());
+      else if (arg == "--images")    useImages = true;
       else { printUsage(); return 1; }
     }
     if (colorPath.empty()) { printUsage(); return 1; }
@@ -408,23 +474,42 @@ int main(int argc, char* argv[])
     printf("Device: %s, cooperative matrices: %s\n", context->getDeviceName(),
            context->isCooperativeMatrixEnabled() ? "yes" : "no");
 
-    // Image buffers (device local) and staging buffer
-    const size_t pixelSize = (half ? 2 : 4) * 3;
+    if (useImages && !context->areImageViewsSupported())
+      throw std::runtime_error("image views are not supported (VK_KHR_push_descriptor)");
+
+    // Images are stored in device local buffers (RGB) or storage images (RGBA). The alpha of the
+    // output image is initialized to a known value to check that it is preserved.
+    const int numChannels = useImages ? 4 : 3;
+    const float outputAlpha = 0.25f;
+    const size_t pixelSize = (half ? 2 : 4) * numChannels;
     const size_t imageByteSize = size_t(W) * H * pixelSize;
     std::vector<Buffer> imageBuffers;
+    std::vector<App::ImageResource> images;
+    const VkFormat imageFormat = half ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R32G32B32A32_SFLOAT;
     for (size_t i = 0; i < inputs.size() + 1; ++i)
-      imageBuffers.push_back(app.createBuffer(imageByteSize, false));
+    {
+      if (useImages)
+        images.push_back(app.createImage(uint32_t(W), uint32_t(H), imageFormat));
+      else
+        imageBuffers.push_back(app.createBuffer(imageByteSize, false));
+    }
     Buffer staging = app.createBuffer(imageByteSize * (inputs.size() + 1), true);
 
-    for (size_t i = 0; i < inputs.size(); ++i)
+    // Fill the staging buffer with the inputs and the initial output (zero RGB, known alpha)
+    for (size_t i = 0; i < inputs.size() + 1; ++i)
     {
       char* dst = static_cast<char*>(staging.mapped) + i * imageByteSize;
-      for (size_t j = 0; j < inputs[i].data.size(); ++j)
+      for (size_t pixel = 0; pixel < size_t(W) * H; ++pixel)
       {
-        if (half)
-          reinterpret_cast<uint16_t*>(dst)[j] = floatToHalf(inputs[i].data[j]);
-        else
-          reinterpret_cast<float*>(dst)[j] = inputs[i].data[j];
+        for (int c = 0; c < numChannels; ++c)
+        {
+          const float value = (c == 3) ? outputAlpha : (i < inputs.size() ? inputs[i].data[pixel * 3 + c] : 0.f);
+          const size_t j = pixel * numChannels + c;
+          if (half)
+            reinterpret_cast<uint16_t*>(dst)[j] = floatToHalf(value);
+          else
+            reinterpret_cast<float*>(dst)[j] = value;
+        }
       }
     }
 
@@ -434,10 +519,22 @@ int main(int argc, char* argv[])
     result = vkoidn::Denoiser::create(*context, cmd, createInfo, denoiser);
     if (result != vkoidn::Result::Success)
       throw std::runtime_error(std::string("denoiser creation failed: ") + vkoidn::getResultString(result));
-    for (size_t i = 0; i < inputs.size(); ++i)
+    for (size_t i = 0; i < inputs.size() + 1; ++i)
     {
-      VkBufferCopy region{i * imageByteSize, 0, imageByteSize};
-      vkCmdCopyBuffer(cmd, staging.buffer, imageBuffers[i].buffer, 1, &region);
+      if (useImages)
+      {
+        App::toGeneralLayout(cmd, images[i].image);
+        VkBufferImageCopy region{};
+        region.bufferOffset = i * imageByteSize;
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {uint32_t(W), uint32_t(H), 1};
+        vkCmdCopyBufferToImage(cmd, staging.buffer, images[i].image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+      }
+      else if (i < inputs.size())
+      {
+        VkBufferCopy region{i * imageByteSize, 0, imageByteSize};
+        vkCmdCopyBuffer(cmd, staging.buffer, imageBuffers[i].buffer, 1, &region);
+      }
     }
     app.submitAndWait(cmd);
 
@@ -454,10 +551,21 @@ int main(int argc, char* argv[])
     };
 
     vkoidn::DenoiseInputs denoiseInputs;
-    denoiseInputs.color = makeImage(imageBuffers[0]);
-    if (createInfo.albedo) denoiseInputs.albedo = makeImage(imageBuffers[1]);
-    if (createInfo.normal) denoiseInputs.normal = makeImage(imageBuffers[2]);
-    denoiseInputs.output = makeImage(imageBuffers.back());
+    if (useImages)
+    {
+      denoiseInputs.colorView.view = images[0].view;
+      if (createInfo.albedo) denoiseInputs.albedoView.view = images[1].view;
+      if (createInfo.normal) denoiseInputs.normalView.view = images[2].view;
+      denoiseInputs.outputView.view = images.back().view;
+      denoiseInputs.outputView.format = imageFormat;
+    }
+    else
+    {
+      denoiseInputs.color = makeImage(imageBuffers[0]);
+      if (createInfo.albedo) denoiseInputs.albedo = makeImage(imageBuffers[1]);
+      if (createInfo.normal) denoiseInputs.normal = makeImage(imageBuffers[2]);
+      denoiseInputs.output = makeImage(imageBuffers.back());
+    }
     denoiseInputs.inputScale = inputScale;
 
     // Denoise
@@ -469,8 +577,18 @@ int main(int argc, char* argv[])
       throw std::runtime_error(std::string("cmdDenoise failed: ") + vkoidn::getResultString(result));
     App::barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-    VkBufferCopy region{0, 0, imageByteSize};
-    vkCmdCopyBuffer(cmd, imageBuffers.back().buffer, staging.buffer, 1, &region);
+    if (useImages)
+    {
+      VkBufferImageCopy region{};
+      region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+      region.imageExtent = {uint32_t(W), uint32_t(H), 1};
+      vkCmdCopyImageToBuffer(cmd, images.back().image, VK_IMAGE_LAYOUT_GENERAL, staging.buffer, 1, &region);
+    }
+    else
+    {
+      VkBufferCopy region{0, 0, imageByteSize};
+      vkCmdCopyBuffer(cmd, imageBuffers.back().buffer, staging.buffer, 1, &region);
+    }
     App::barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                  VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
     app.submitAndWait(cmd);
@@ -479,9 +597,21 @@ int main(int argc, char* argv[])
     output.width = W;
     output.height = H;
     output.data.resize(size_t(W) * H * 3);
-    for (size_t j = 0; j < output.data.size(); ++j)
-      output.data[j] = half ? halfToFloat(static_cast<const uint16_t*>(staging.mapped)[j])
-                            : static_cast<const float*>(staging.mapped)[j];
+    auto readValue = [&](size_t j)
+    {
+      return half ? halfToFloat(static_cast<const uint16_t*>(staging.mapped)[j])
+                  : static_cast<const float*>(staging.mapped)[j];
+    };
+    size_t alphaErrors = 0;
+    for (size_t pixel = 0; pixel < size_t(W) * H; ++pixel)
+    {
+      for (int c = 0; c < 3; ++c)
+        output.data[pixel * 3 + c] = readValue(pixel * numChannels + c);
+      if (useImages && readValue(pixel * numChannels + 3) != outputAlpha)
+        ++alphaErrors;
+    }
+    if (useImages)
+      printf("Output alpha preserved: %s\n", alphaErrors == 0 ? "yes" : "NO");
 
     // Benchmark
     if (numRuns > 0)
@@ -510,6 +640,8 @@ int main(int argc, char* argv[])
 
     for (auto& b : imageBuffers)
       app.destroyBuffer(b);
+    for (auto& image : images)
+      app.destroyImage(image);
     app.destroyBuffer(staging);
     denoiser.reset();
     context.reset();
@@ -527,7 +659,7 @@ int main(int argc, char* argv[])
       const double avgError = compareImages(output, ref, numOutliers);
       const bool ok = avgError <= maxError && numOutliers == 0;
       printf("Compare: avgerror=%g, outliers=%zu -> %s\n", avgError, numOutliers, ok ? "OK" : "FAILED");
-      exitCode = ok ? 0 : 1;
+      exitCode = (ok && alphaErrors == 0) ? 0 : 1;
     }
 
     app.destroy();

@@ -54,6 +54,7 @@ namespace vkoidn {
   // Sets the device features required by the library in the application's feature structures
   // (only sets features to VK_TRUE, never clears them). coopMatFeatures may be null if
   // VK_KHR_cooperative_matrix is not enabled.
+  // (also enables shaderStorageImageReadWithoutFormat/WriteWithoutFormat for image view inputs)
   void enableRequiredFeatures(VkPhysicalDeviceFeatures2& features,
                               VkPhysicalDeviceVulkan11Features& features11,
                               VkPhysicalDeviceVulkan12Features& features12,
@@ -93,6 +94,9 @@ namespace vkoidn {
 
     // Name of the physical device
     virtual const char* getDeviceName() const = 0;
+
+    // Whether image views can be used as inputs/outputs (VK_KHR_push_descriptor enabled)
+    virtual bool areImageViewsSupported() const = 0;
   };
 
   // -----------------------------------------------------------------------------------------------
@@ -145,11 +149,18 @@ namespace vkoidn {
     uint32_t rowByteStride = 0;   // 0 = tightly packed
   };
 
-  // Image specified by a storage image view (VK_IMAGE_LAYOUT_GENERAL, e.g. R32G32B32A32_SFLOAT or
-  // R16G16B16A16_SFLOAT). Requires VK_KHR_push_descriptor (core in Vulkan 1.4).
+  // Image specified by a storage image view in VK_IMAGE_LAYOUT_GENERAL (e.g. R32G32B32A32_SFLOAT or
+  // R16G16B16A16_SFLOAT; the RGB channels are used and the alpha of the output is preserved). The
+  // image must have VK_IMAGE_USAGE_STORAGE_BIT and be at least as large as the denoiser.
+  // Requires VK_KHR_push_descriptor.
   struct ImageViewImage
   {
     VkImageView view = VK_NULL_HANDLE;
+
+    // Format of the image (optional). For 16-bit float output images, the values are rounded to
+    // the nearest FP16 value before storing them; otherwise the rounding of the storage image
+    // conversion is implementation-defined (slightly less accurate on some devices).
+    VkFormat format = VK_FORMAT_UNDEFINED;
   };
 
   struct DenoiseInputs

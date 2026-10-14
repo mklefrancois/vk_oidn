@@ -61,6 +61,8 @@ namespace vkoidn {
   {
     features.features.shaderInt64 = VK_TRUE;
     features.features.shaderInt16 = VK_TRUE;
+    features.features.shaderStorageImageReadWithoutFormat = VK_TRUE;  // image view inputs/outputs
+    features.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
     features13.maintenance4 = VK_TRUE; // workgroup size from a specialization constant
     features11.storageBuffer16BitAccess = VK_TRUE;
     features12.bufferDeviceAddress = VK_TRUE;

@@ -16,7 +16,7 @@ never submits work or waits on the host.
 > 1. [x] Repository skeleton, license, draft API (`include/vk_oidn/vk_oidn.h`)
 > 2. [ ] Weight packer (`tools/`): OIDN `.tza` weights → GPU-ready blobs
 > 3. [x] Slang shaders (`shaders/vk_oidn.slang`), validated in the OIDN fork
-> 4. [x] API implementation (`src/`) with buffer images; storage image views: in progress
+> 4. [x] API implementation (`src/`), inputs/outputs as buffers or storage image views
 > 5. [ ] Validation against Open Image Denoise and benchmarks (`tests/`)
 > 6. [ ] Samples (vk_mini_samples, vk_gltf_renderer)
 
@@ -57,11 +57,20 @@ inputs.normal = {normalAddress, vkoidn::Format::Float, 3, 16};
 inputs.output = {outputAddress, vkoidn::Format::Float, 3, 16};
 denoiser->cmdDenoise(cmd, inputs);
 // barrier: compute shader write -> your use of the output
+
+// Alternatively, storage image views (VK_IMAGE_LAYOUT_GENERAL, RGBA32F/RGBA16F, alpha preserved):
+inputs = {};
+inputs.colorView  = {colorView};
+inputs.albedoView = {albedoView};
+inputs.normalView = {normalView};
+inputs.outputView = {outputView, VK_FORMAT_R16G16B16A16_SFLOAT}; // format: exact FP16 rounding
+denoiser->cmdDenoise(cmd, inputs);
 ```
 
 See [`tests/denoise_test.cpp`](tests/denoise_test.cpp) for a complete example. It is also a
 command-line tool: `vk_oidn_denoise_test --hdr color.pfm --alb albedo.pfm --nrm normal.pfm -o out.pfm`
-(`-r ref.pfm` compares with a reference, `-n 50` measures the GPU time).
+(`-r ref.pfm` compares with a reference, `-n 50` measures the GPU time, `--images` uses storage
+image views instead of buffers).
 
 Validation: on 22 configurations (HDR/LDR/sRGB, albedo/normal/clean aux, all qualities, half
 images, fixed input scale, tiled), the output is bit-identical to the Vulkan backend of the OIDN

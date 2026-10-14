@@ -27,6 +27,8 @@ namespace vkoidn {
     F(vkBindBufferMemory)                                \
     F(vkMapMemory)                                       \
     F(vkUnmapMemory)                                     \
+    F(vkCreateDescriptorSetLayout)                       \
+    F(vkDestroyDescriptorSetLayout)                      \
     F(vkCreateShaderModule)                              \
     F(vkDestroyShaderModule)                             \
     F(vkCreatePipelineLayout)                            \
@@ -47,6 +49,7 @@ namespace vkoidn {
     VKOIDN_INSTANCE_FUNCS_OPT(VKOIDN_DECLARE_FUNC)
     VKOIDN_DEVICE_FUNCS(VKOIDN_DECLARE_FUNC)
     PFN_vkGetBufferDeviceAddress vkGetBufferDeviceAddress = nullptr;
+    PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR = nullptr; // optional (image views)
 
     // Loads the functions; returns false if a required function is missing
     bool load(VkInstance instance, VkDevice device,
@@ -65,6 +68,9 @@ namespace vkoidn {
       if (!getDeviceProcAddr)
         getDeviceProcAddr = vkGetDeviceProcAddr;
       VKOIDN_DEVICE_FUNCS(VKOIDN_LOAD_DEVICE)
+
+      vkCmdPushDescriptorSetKHR = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(
+        getDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR"));
 
       // Core in Vulkan 1.2, fall back to the KHR alias if needed
       vkGetBufferDeviceAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(
