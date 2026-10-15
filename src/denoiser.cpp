@@ -397,7 +397,6 @@ namespace vkoidn {
       const uint32_t pool     = (layer.desc.flags & weightsLayerPoolDst) ? 1 : 0;
       const uint32_t relu     = (layer.desc.flags & weightsLayerReLU) ? 1 : 0;
       const int numBlocks = int(layer.desc.outChannels / 16);
-      const int numInputChannels = int(layer.desc.inChannels0 + layer.desc.inChannels1);
 
       if (ctx.useCoopMat2() && !upsample && !pool && !accF16)
       {
@@ -439,16 +438,16 @@ namespace vkoidn {
       }
       else if (ctx.isCooperativeMatrixEnabled())
       {
-        // Select the tile configuration (tuned on NVIDIA Blackwell):
-        // - 1 output block per workgroup if the number of output blocks is odd (no wasted work)
-        //   or if there would not be enough workgroups to fill the GPU
-        // - wider tiles for layers with many input channels (more reuse of the weights)
-        int mx = 2, nf = 2;
-        const int numTiles = ceilDiv(layer.convW, 32) * ceilDiv(layer.convH, 8) * ceilDiv(numBlocks, 2);
-        if (numBlocks % 2 != 0 || numTiles < 1200)
-          nf = 1;
-        else if (numInputChannels > 64)
-          mx = 3;
+        // Select the tile configuration (tuned on NVIDIA Blackwell): 32x8 pixel tiles (the largest
+        // that fit in shared memory with the staged weights) and 2 output blocks per workgroup,
+        // or 1 if the number of output blocks is odd (no wasted work). With the staged weights,
+        // 2 blocks are faster even for the small low-resolution layers.
+        const int mx = 2;
+        int nf = (numBlocks % 2 != 0) ? 1 : 2;
+
+        // Debugging/tuning: force the number of output blocks per workgroup (VK_OIDN_CONV_VARIANT=mx2_nf1)
+        if (const char* variant = getenv("VK_OIDN_CONV_VARIANT"))
+          sscanf(variant, "mx2_nf%d", &nf);
 
         layer.tileW = 16 * mx;
         layer.tileH = 8;

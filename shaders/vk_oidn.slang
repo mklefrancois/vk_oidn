@@ -722,7 +722,12 @@ uint64_t getDstAddress(ConvParams p, int y, int x, int dstW, int c)
 // N_FRAGS output channel blocks. The two rows of a subgroup form the rows of the 2x2 pooling
 // windows, so pooling can be fused without exchanging data between subgroups.
 // The input tiles are double-buffered in shared memory: the next chunk is prefetched into
-// registers while the current one is being multiplied, so there is one barrier per chunk.
+// registers while the current one is being multiplied.
+// The weights of the chunk (9 taps x N_FRAGS blocks) are also staged in shared memory, loaded once
+// per workgroup with coalesced loads instead of once per subgroup with cooperative matrix loads
+// from global memory (the weight loads were the main cost of the kernel: 1.2-2x faster layers).
+// They are single-buffered to fit in 48 KB with MX = 2 (41.8 KB), so there are two barriers per
+// chunk: one before overwriting the weights, one before using the new ones.
 
 using namespace linalg;
 
@@ -748,6 +753,32 @@ static const int CM_NUM_LOADS = CM_IN_H * CM_IN_W * 2;       // uint4 global loa
 static const int CM_MAX_LOADS = (CM_NUM_LOADS + CM_NUM_SG * 32 - 1) / (CM_NUM_SG * 32);
 
 groupshared uint4 cmIn[2 * CM_IN_TILE_SIZE];
+
+// Weights of the current chunk in shared memory: [tap][output block][16 rows][WSTR uint4]
+// (2 uint4 = 16 halfs per row, + 1 uint4 of padding against bank conflicts, slightly faster)
+static const int WSTR = 3;
+static const int CM_W_SIZE = 9 * N_FRAGS * 16 * WSTR;     // in uint4 units
+static const int CM_W_LOADS = 9 * N_FRAGS * 32;             // uint4 global loads per chunk
+static const int CM_W_MAX_LOADS = (CM_W_LOADS + CM_NUM_SG * 32 - 1) / (CM_NUM_SG * 32);
+groupshared uint4 cmW[CM_W_SIZE];
+
+// Loads the i-th uint4 of the weights of a chunk (zero for output blocks beyond the layer)
+uint4 loadConvWeights(ConvParams p, int kc, int nb0, int i)
+{
+  const int e = i & 31;          // uint4 within the 16x16 block
+  const int block = i >> 5;      // tap * N_FRAGS + n
+  const int tap = block / N_FRAGS;
+  const int n = block - tap * N_FRAGS;
+  if (i >= CM_W_LOADS || nb0 + n >= p.NB)
+    return uint4(0);
+  return *(uint4*)(p.weight + getWeightOffset(p, kc, tap, nb0 + n) + uint64_t(e) * 16ull);
+}
+
+// Shared memory index of the i-th uint4 of the weights of a chunk
+int weightSmemIndex(int i)
+{
+  return (i >> 1) * WSTR + (i & 1);
+}
 
 // Stores an output fragment (16 pixels x 16 channels) of a row
 void storeFragment(ConvParams p, MatO o, int sg, uint lane, uint numLanes, int y, int x0, int nb)
@@ -797,6 +828,10 @@ void convCoopMat(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, un
     const int tx = pix - ty * CM_IN_W;
     prefetch[j] = (i < CM_NUM_LOADS) ? loadConvInput(p, 0, y0 + ty - 1, x0 + tx - 1, i & 1) : uint4(0);
   }
+  uint4 wPrefetch[CM_W_MAX_LOADS];
+  [unroll]
+  for (int j = 0; j < CM_W_MAX_LOADS; ++j)
+    wPrefetch[j] = loadConvWeights(p, 0, nb0, int(localIndex) + j * int(WG_SIZE));
 
   // Initialize the accumulators with the bias
   MatC acc[2][MX][N_FRAGS];
@@ -826,6 +861,13 @@ void convCoopMat(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, un
     if (i < CM_NUM_LOADS)
       cmIn[(i >> 1) * KSTR + (i & 1)] = prefetch[j];
   }
+  [unroll]
+  for (int j = 0; j < CM_W_MAX_LOADS; ++j)
+  {
+    const int i = int(localIndex) + j * int(WG_SIZE);
+    if (i < CM_W_LOADS)
+      cmW[weightSmemIndex(i)] = wPrefetch[j];
+  }
   GroupMemoryBarrierWithGroupSync();
 
   // Iterate over the input channel chunks
@@ -846,6 +888,9 @@ void convCoopMat(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, un
         const int tx = pix - ty * CM_IN_W;
         prefetch[j] = (i < CM_NUM_LOADS) ? loadConvInput(p, kc + 1, y0 + ty - 1, x0 + tx - 1, i & 1) : uint4(0);
       }
+      [unroll]
+      for (int j = 0; j < CM_W_MAX_LOADS; ++j)
+        wPrefetch[j] = loadConvWeights(p, kc + 1, nb0, int(localIndex) + j * int(WG_SIZE));
     }
 
     [unroll]
@@ -858,8 +903,7 @@ void convCoopMat(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, un
       [unroll]
       for (int n = 0; n < N_FRAGS; ++n)
       {
-        if (nb0 + n < p.NB)
-          b[n] = MatB.Load<CoopMatMatrixLayout.RowMajor>((half*)(p.weight + getWeightOffset(p, kc, tap, nb0 + n)), 0, 16);
+        b[n] = MatB.Load<CoopMatMatrixLayout.RowMajor>(cmW, uint((tap * N_FRAGS + n) * 16 * WSTR), WSTR);
       }
 
       [unroll]
@@ -894,6 +938,20 @@ void convCoopMat(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, un
       }
     }
     GroupMemoryBarrierWithGroupSync();
+
+    // The weights are single-buffered: store the next chunk once all subgroups are done with the
+    // current one (barrier above), then wait until they are visible
+    if (kc + 1 < numChunks)
+    {
+      [unroll]
+      for (int j = 0; j < CM_W_MAX_LOADS; ++j)
+      {
+        const int i = int(localIndex) + j * int(WG_SIZE);
+        if (i < CM_W_LOADS)
+          cmW[weightSmemIndex(i)] = wPrefetch[j];
+      }
+      GroupMemoryBarrierWithGroupSync();
+    }
   }
 
   // Epilogue (the input tile buffers are reused as staging areas)
@@ -1045,6 +1103,34 @@ uint64_t getUpWeightOffset1(ConvParams p, int kc1, int tap, int nb)
   return uint64_t(base + (kc1 * 9 + tap) * p.NB + nb) * 512ull;
 }
 
+// Weights of the current chunk staged in shared memory (see convCoopMat), 16x16 blocks of 32 uint4:
+// first source [phase][2x2 tap][output block], second source [3x3 tap][output block].
+// Without padding (bank conflicts) to fit in 48 KB with the input tiles: 49024 bytes with N_FRAGS = 2.
+static const int UP_W_BLOCKS = 16 * N_FRAGS; // largest chunk: first source, 4 phases x 4 taps
+static const int UP_W_LOADS = UP_W_BLOCKS * 32;
+static const int UP_W_MAX_LOADS = (UP_W_LOADS + CM_NUM_SG * 32 - 1) / (CM_NUM_SG * 32);
+groupshared uint4 upW[UP_W_LOADS];
+
+// Loads the i-th uint4 of the weights of a chunk (zero for unused blocks)
+uint4 loadUpWeights(ConvParams p, int kc, int nb0, int i)
+{
+  const int numChunks0 = p.C0 / 16;
+  const int e = i & 31;
+  const int block = i >> 5;
+  const int t = block / N_FRAGS; // phase * 4 + tap (first source) or tap (second source)
+  const int n = block - t * N_FRAGS;
+  if (i >= UP_W_LOADS || nb0 + n >= p.NB)
+    return uint4(0);
+  uint64_t offset;
+  if (kc < numChunks0)
+    offset = getUpWeightOffset0(p, kc, t >> 2, t & 3, nb0 + n);
+  else if (t < 9)
+    offset = getUpWeightOffset1(p, kc - numChunks0, t, nb0 + n);
+  else
+    return uint4(0);
+  return *(uint4*)(p.weight + offset + uint64_t(e) * 16ull);
+}
+
 // Stores an output fragment containing the pixels x0 + 2 * j of a row
 void storeFragmentStride2(ConvParams p, MatO o, int sg, uint lane, uint numLanes, int y, int x0, int nb)
 {
@@ -1092,6 +1178,10 @@ void convCoopMatUp(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, 
   [unroll]
   for (int j = 0; j < UP_MAX_LOADS; ++j)
     prefetch[j] = loadUpInput(p, 0, int(localIndex) + j * int(WG_SIZE), y0, x0);
+  uint4 wPrefetch[UP_W_MAX_LOADS];
+  [unroll]
+  for (int j = 0; j < UP_W_MAX_LOADS; ++j)
+    wPrefetch[j] = loadUpWeights(p, 0, nb0, int(localIndex) + j * int(WG_SIZE));
 
   // Initialize the accumulators with the bias: [output row of the phase][output block]
   MatC acc[4][N_FRAGS];
@@ -1119,6 +1209,13 @@ void convCoopMatUp(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, 
     if (i < UP_LOADS1)
       upIn[(i >> 1) * KSTR + (i & 1)] = prefetch[j];
   }
+  [unroll]
+  for (int j = 0; j < UP_W_MAX_LOADS; ++j)
+  {
+    const int i = int(localIndex) + j * int(WG_SIZE);
+    if (i < UP_W_LOADS)
+      upW[i] = wPrefetch[j];
+  }
   GroupMemoryBarrierWithGroupSync();
 
   for (int kc = 0; kc < numChunks; ++kc)
@@ -1131,6 +1228,9 @@ void convCoopMatUp(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, 
       [unroll]
       for (int j = 0; j < UP_MAX_LOADS; ++j)
         prefetch[j] = loadUpInput(p, kc + 1, int(localIndex) + j * int(WG_SIZE), y0, x0);
+      [unroll]
+      for (int j = 0; j < UP_W_MAX_LOADS; ++j)
+        wPrefetch[j] = loadUpWeights(p, kc + 1, nb0, int(localIndex) + j * int(WG_SIZE));
     }
 
     if (kc < numChunks0)
@@ -1146,9 +1246,7 @@ void convCoopMatUp(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, 
         [unroll]
         for (int n = 0; n < N_FRAGS; ++n)
         {
-          if (nb0 + n < p.NB)
-            b[n] = MatB.Load<CoopMatMatrixLayout.RowMajor>(
-              (half*)(p.weight + getUpWeightOffset0(p, kc, py * 2 + px, tap, nb0 + n)), 0, 16);
+          b[n] = MatB.Load<CoopMatMatrixLayout.RowMajor>(upW, uint((((py * 2 + px) * 4 + tap) * N_FRAGS + n) * 32), 2);
         }
 
         [unroll]
@@ -1181,9 +1279,7 @@ void convCoopMatUp(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, 
         [unroll]
         for (int n = 0; n < N_FRAGS; ++n)
         {
-          if (nb0 + n < p.NB)
-            b[n] = MatB.Load<CoopMatMatrixLayout.RowMajor>(
-              (half*)(p.weight + getUpWeightOffset1(p, kc1, tap, nb0 + n)), 0, 16);
+          b[n] = MatB.Load<CoopMatMatrixLayout.RowMajor>(upW, uint((tap * N_FRAGS + n) * 32), 2);
         }
 
         [unroll]
@@ -1216,6 +1312,19 @@ void convCoopMatUp(uint3 groupID : SV_GroupID, uint localIndex : SV_GroupIndex, 
       }
     }
     GroupMemoryBarrierWithGroupSync();
+
+    // Single-buffered weights: store the next chunk once the current one is no longer read
+    if (kc + 1 < numChunks)
+    {
+      [unroll]
+      for (int j = 0; j < UP_W_MAX_LOADS; ++j)
+      {
+        const int i = int(localIndex) + j * int(WG_SIZE);
+        if (i < UP_W_LOADS)
+          upW[i] = wPrefetch[j];
+      }
+      GroupMemoryBarrierWithGroupSync();
+    }
   }
 
   // Epilogue (the input tile buffers are reused as staging areas)

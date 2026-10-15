@@ -4,6 +4,7 @@
 #include "context.h"
 #include "kernels.h"
 #include "kernel_params.h"
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -271,6 +272,26 @@ namespace vkoidn {
 
     size_t codeSize = 0;
     const void* code = getEmbeddedKernel(moduleName.c_str(), &codeSize);
+
+    // Development: VK_OIDN_KERNEL_DIR=<dir> loads <dir>/<kernel>.spv instead of the embedded kernel
+    // when the file exists (to try kernel changes without rebuilding the library)
+    std::vector<uint32_t> fileCode;
+    if (const char* dir = getenv("VK_OIDN_KERNEL_DIR"))
+    {
+      if (FILE* file = fopen((std::string(dir) + "/" + moduleName + ".spv").c_str(), "rb"))
+      {
+        fseek(file, 0, SEEK_END);
+        const long size = ftell(file);
+        fseek(file, 0, SEEK_SET);
+        fileCode.resize(size_t(size) / 4);
+        if (fread(fileCode.data(), 4, fileCode.size(), file) == fileCode.size())
+        {
+          code = fileCode.data();
+          codeSize = fileCode.size() * 4;
+        }
+        fclose(file);
+      }
+    }
     if (!code)
       return Result::ErrorInvalidArgument;
 

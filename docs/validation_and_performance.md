@@ -184,26 +184,32 @@ processed in 2 tiles (OIDN's default maximum of 2160x2160 pixels per tile).
 
 ### Final results
 
-| Resolution | Quality | OIDN 2.5.1 CUDA | OIDN fork, GLSL | OIDN fork, Slang | vk_oidn, no sub-pixel | **vk_oidn** |
-|------------|---------|-----------------|-----------------|------------------|-----------------------|-------------|
-| 1280x720   | high    | 3.50 ms         | 3.67 ms         | 3.43 ms          |                       |             |
-| 1920x1080  | high    | 8.10 ms         | 8.12 ms         | 7.50 ms          | 7.29 ms               | **6.72 ms** |
-| 3840x2160  | high    | 34.65 ms        | 33.66 ms        | 30.72 ms         | 30.22 ms              | **27.83 ms** |
-| 1280x720   | fast    | 2.36 ms         | 1.88 ms         | 1.90 ms          |                       |             |
-| 1920x1080  | fast    | 5.55 ms         | 4.14 ms         | 4.17 ms          | 3.96 ms               | **3.65 ms** |
-| 3840x2160  | fast    | 23.41 ms        | 16.50 ms        | 16.50 ms         | 16.03 ms              | **14.63 ms** |
+| Resolution | Quality | OIDN 2.5.1 CUDA | OIDN fork, GLSL | OIDN fork, Slang | vk_oidn, no sub-pixel | vk_oidn 0.1 | **vk_oidn, staged weights** |
+|------------|---------|-----------------|-----------------|------------------|-----------------------|-------------|-----------------------------|
+| 1280x720   | high    | 3.50 ms         | 3.67 ms         | 3.43 ms          |                       |             |                             |
+| 1920x1080  | high    | 8.10 ms         | 8.12 ms         | 7.50 ms          | 7.29 ms               | 6.72 ms     | **5.01 ms**                 |
+| 3840x2160  | high    | 34.65 ms        | 33.66 ms        | 30.72 ms         | 30.22 ms              | 27.83 ms    | **22.77 ms**                |
+| 1280x720   | fast    | 2.36 ms         | 1.88 ms         | 1.90 ms          |                       |             |                             |
+| 1920x1080  | fast    | 5.55 ms         | 4.14 ms         | 4.17 ms          | 3.96 ms               | 3.65 ms     | **2.89 ms**                 |
+| 3840x2160  | fast    | 23.41 ms        | 16.50 ms        | 16.50 ms         | 16.03 ms              | 14.63 ms    | **12.55 ms**                |
 
-vk_oidn is 1.2x (high) to 1.6x (fast) faster than OIDN's CUDA backend on this GPU. Without the
-sub-pixel decomposition it runs the same kernels as the fork and is slightly faster because
-everything is recorded in the application's command buffer, with no host-side overhead. Storage
-image views instead of buffers do not change the time (7.39 ms vs 7.31 ms before the sub-pixel
-decomposition).
+vk_oidn is 1.5x (high) to 1.9x (fast) faster than OIDN's CUDA backend on this GPU (balanced
+quality: 4.91 ms at 1080p, 22.30 ms at 4K). The last column stages the weights of the
+convolutions in shared memory (see below); the outputs are bit-identical to the previous
+version. Without the sub-pixel decomposition, vk_oidn 0.1 runs the same kernels as the fork and
+is slightly faster because everything is recorded in the application's command buffer, with no
+host-side overhead. Storage image views instead of buffers do not change the time (7.39 ms vs
+7.31 ms before the sub-pixel decomposition).
+
+The last column was measured while another application intermittently used the GPU: each
+configuration waited until the GPU was idle for 10 s and the best of 3 runs of `-n 20` is given.
 
 Memory (scratch + weights) for 1920x1080: 384 MB (base network), 518 MB (large network),
 256 MB (small network); 3840x2160 in 2 tiles: 799 MB.
 
 ### Laptop results (RTX 3500 Ada Generation)
 
+Measured with vk_oidn 0.1, before the weights were staged in shared memory.
 Same method and models, on an NVIDIA RTX 3500 Ada Generation Laptop GPU (12 GB, 95 W maximum
 board power, driver 616.64, Vulkan 1.4.351), Core i7-13800H, Windows 11, on AC power with the
 Balanced power plan. Builds: vk_oidn with Visual Studio 2026 (MSVC 19.51), Slang 2026.17; the OIDN
@@ -239,6 +245,8 @@ observations, compared to the desktop GPU:
 
 ### Per-layer times (vk_oidn, 1920x1088 tile, high quality)
 
+vk_oidn 0.1 (before the weights were staged in shared memory, see below for the current times).
+
 | Layer      | Time     | Layer      | Without sub-pixel | With sub-pixel |
 |------------|----------|------------|-------------------|----------------|
 | input      | 0.168 ms | dec_conv4a | 0.181 ms | **0.139 ms** (1.30x) |
@@ -269,7 +277,8 @@ about 98 TFLOPS.
 | 7 | Slang `-O1` | **7.50 ms** |
 | 8 | vk_oidn SDK (same kernels, no host overhead) | 7.31 ms |
 | 9 | sub-pixel decomposition of the upsampling layers, first version (each subgroup owns fragments of 4 different phases) | 7.79 ms |
-| 10 | sub-pixel decomposition, one phase per subgroup (each weight tile feeds 4 fragments) | **6.72 ms** |
+| 10 | sub-pixel decomposition, one phase per subgroup (each weight tile feeds 4 fragments) | 6.72 ms |
+| 11 | weights staged in shared memory (both kernels), 32x8 tiles everywhere, 2 output blocks per workgroup unless odd | **5.01 ms** |
 
 Tile sweep (step 3; SG = subgroups per workgroup, MX = 16-pixel column fragments per subgroup
 row, NF = 16-channel output blocks per workgroup; accumulators per subgroup = 2 x MX x NF):
@@ -344,6 +353,69 @@ phase (4 rows of the same parity) restores the reuse and gives the speedup above
 the upsampling layers, about 8% overall (1080p high: 7.29 → 6.72 ms, fast: 3.96 → 3.65 ms;
 4K high: 30.22 → 27.83 ms, fast: 16.03 → 14.63 ms).
 
+### Weights staged in shared memory
+
+At 89 TFLOPS on average, the kernels used about 45% of the FP16 tensor core peak (next section),
+so they were limited by data movement. To find which data, two diagnostic builds of the main
+convolution kernel (wrong results, timing only) loaded the input fragments (from shared memory)
+or the weight fragments (cooperative matrix loads from global memory) once per chunk instead of
+once per tap. 1920x1088, high quality, all layers with 32x8 tiles and 2 output blocks per
+workgroup, best of 3 runs:
+
+| Layer | Normal | Input loads once per chunk | **Weight loads once per chunk** |
+|-------|--------|----------------------------|---------------------------------|
+| enc_conv1  | 0.448 ms | 0.426 ms | **0.292 ms** |
+| dec_conv3b | 0.293 ms | 0.284 ms | **0.142 ms** |
+| dec_conv2b | 0.514 ms | 0.499 ms | **0.318 ms** |
+| dec_conv1b | 0.949 ms | 0.919 ms | **0.623 ms** |
+| total      | 6.447 ms | 6.322 ms | **5.312 ms** |
+
+The input loads from shared memory cost little; the weight loads were the main cost. Each of the
+4 subgroups of a workgroup loaded the same weight fragments from global memory, just before using
+them. Three ways to reduce this were tried:
+
+| Change | 1080p high (balanced) | Result |
+|--------|------------------------|--------|
+| 4 output blocks per workgroup (`nf4`, 16 multiply-adds per 8 fragment loads instead of 8 per 6) | 7.69 ms (6.82 ms) vs 6.68 ms (6.07 ms) | slower: the weight loads grow with the output blocks, more registers, wasted work for layers with 2 or 6 blocks |
+| Weight fragments of the next tap loaded in registers during the current tap (hide the latency) | 6.73 ms (5.88 ms) vs 6.35 ms (5.78 ms) | slower: the cost is the number of loads, not their latency, and more registers |
+| **Weights of the chunk staged in shared memory**, loaded once per workgroup with coalesced `uint4` loads | **4.97 ms (4.85 ms)** vs 6.37 ms (5.78 ms) | **1.28x (1.19x)** |
+
+With the weights in shared memory, a chunk needs 9 taps x 2 output blocks x 512 bytes = 9 KB for
+the main kernel, and up to 16 KB for the sub-pixel kernel (4 phases x 4 taps). Next to the
+double-buffered input tiles (32.6 KB), they only fit single-buffered in the 48 KB available to a
+Vulkan workgroup (`maxComputeSharedMemorySize`), so each chunk has two barriers: before
+overwriting the weights and before using the new ones. The main kernel pads the weight rows
+(48-byte stride, 41.8 KB in total, slightly faster than without padding); the sub-pixel kernel
+cannot (49,024 bytes). The 48-pixel-wide tiles no longer fit, but the 32-pixel tiles with staged
+weights are faster on every layer, and 2 output blocks per workgroup are now faster even for the
+small low-resolution layers (1 block only when the number of blocks is odd).
+
+Per-layer times, 1920x1088, high quality (best of 3 runs):
+
+| Layer | Before | Staged weights | Layer | Before | Staged weights |
+|-------|--------|----------------|-------|--------|----------------|
+| input      | 0.161 ms | 0.160 ms | dec_conv4a | 0.140 ms | 0.114 ms |
+| enc_conv0  | 0.261 ms | 0.252 ms | dec_conv4b | 0.130 ms | 0.071 ms |
+| enc_conv1  | 0.445 ms | 0.324 ms | dec_conv3a | 0.372 ms | 0.231 ms |
+| enc_conv2  | 0.205 ms | 0.158 ms | dec_conv3b | 0.287 ms | 0.165 ms |
+| enc_conv3  | 0.101 ms | 0.058 ms | dec_conv2a | 0.670 ms | 0.528 ms |
+| enc_conv4  | 0.059 ms | 0.041 ms | dec_conv2b | 0.506 ms | 0.392 ms |
+| enc_conv5a | 0.043 ms | 0.017 ms | dec_conv1a | 1.625 ms | 1.351 ms |
+| enc_conv5b | 0.051 ms | 0.020 ms | dec_conv1b | 0.936 ms | 0.748 ms |
+| output     | 0.071 ms | 0.070 ms | dec_conv0  | 0.296 ms | 0.259 ms |
+|            |          |          | **total**  | **6.373 ms** | **4.965 ms** |
+
+The summation order is unchanged, so the outputs are bit-identical to the previous kernels in all
+qualities, and all validation configurations pass with no validation layer errors.
+
+**Larger K chunks** (32 input channels per chunk, half the barriers) were not tried: they double
+the shared memory of the input tiles and weights, which is already at the 48 KB limit. They would
+need smaller tiles, which reduce the reuse of the staged weights.
+
+Tools for these experiments: `VK_OIDN_CONV_VARIANT=mx2_nf1` forces the number of output blocks per
+workgroup, and `VK_OIDN_KERNEL_DIR=<dir>` loads `<dir>/<kernel>.spv` instead of the embedded kernel
+(to compare kernel versions with the same library build).
+
 ### Tensor core peak, and an experiment with cooperative vectors (`VK_NV_cooperative_vector`)
 
 How far are the kernels from the hardware limit, and could cooperative vectors, the newer
@@ -365,7 +437,8 @@ SPIR-V matrix-vector instructions for neural shading, be faster? The micro-bench
 The high quality network does 565 GFLOP per 1920x1088 frame (with padded channels), so 6.36 ms is
 an average of 89 TFLOPS: **about 45% of the FP16 peak** (the largest layer reaches 98 TFLOPS,
 49%). The kernels are limited by data movement (loading the activation tiles and weight fragments
-of each multiply-add from shared and global memory), not by the tensor core math. Register use
+of each multiply-add from shared and global memory), not by the tensor core math. Staging the
+weights in shared memory (next section) raised the average to about 113 TFLOPS (56%). Register use
 matters too: in the peak test, 6 or 8 independent FP16 chains per subgroup reach only about
 100 TFLOPS (fewer resident warps).
 
@@ -397,9 +470,10 @@ movement (up to about 2x to the FP16 peak) and in FP8 (2x the math peak and half
 
 ## Ideas for further speedups
 
-- Less data movement per multiply-add in the FP16 kernels (the measured peak is about twice the
-  current average): larger register tiles per subgroup with FP16 accumulation (fewer registers),
-  larger K chunks (32 channels), weights staged in shared memory.
+- Less data movement per multiply-add in the FP16 kernels (the measured peak is still about 1.8x
+  the average after staging the weights): double-buffered weights to remove the second barrier
+  per chunk, or larger K chunks, which need more than the 48 KB of shared memory available to a
+  Vulkan workgroup (smaller tiles or a different input layout).
 - FP8 (E4M3) cooperative matrices: 2x the FP16 peak and half the bytes for weights and activations.
   The FP16-trained weights would need a quantization accuracy analysis (per-channel scales), and
   probably quantization-aware fine-tuning with the Open Image Denoise training scripts.

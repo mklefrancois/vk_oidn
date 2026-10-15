@@ -84,10 +84,10 @@ GPU time on an NVIDIA RTX PRO 4500 Blackwell (hdr + albedo + normal):
 
 | Resolution | Quality | vk_oidn   | OIDN 2.5.1 CUDA |
 |------------|---------|-----------|-----------------|
-| 1920x1080  | high    | 6.72 ms   | 8.10 ms         |
-| 1920x1080  | fast    | 3.65 ms   | 5.55 ms         |
-| 3840x2160  | high    | 27.83 ms  | 34.65 ms        |
-| 3840x2160  | fast    | 14.63 ms  | 23.41 ms        |
+| 1920x1080  | high    | 5.01 ms   | 8.10 ms         |
+| 1920x1080  | fast    | 2.89 ms   | 5.55 ms         |
+| 3840x2160  | high    | 22.77 ms  | 34.65 ms        |
+| 3840x2160  | fast    | 12.55 ms  | 23.41 ms        |
 
 ## Adding vk_oidn to a project
 
@@ -180,6 +180,8 @@ both choices were measurably faster (full front-end unrolling was ~20% slower).
 | `VK_OIDN_COOPMAT=0/1`| disable / force cooperative matrices (default: NVIDIA only)          |
 | `VK_OIDN_CM2=1`      | experimental `VK_NV_cooperative_matrix2` convolutions (slower, see the docs) |
 | `VK_OIDN_SUBPIXEL=0` | disable the sub-pixel decomposition of the upsampling layers          |
+| `VK_OIDN_CONV_VARIANT=mx2_nf1` | force 1 (or 2) output blocks per workgroup in the convolutions (tuning) |
+| `VK_OIDN_KERNEL_DIR=<dir>` | load `<dir>/<kernel>.spv` instead of the embedded kernel when it exists (kernel development) |
 
 ## Weights
 

@@ -177,18 +177,18 @@ fast modes, like OIDN's CUDA backend.
 
 ```mermaid
 flowchart TD
-    subgraph WG ["Workgroup: 4 subgroups, tile of 8 rows x 32 (or 48) pixels x 32 (or 16) output channels"]
+    subgraph WG ["Workgroup: 4 subgroups, tile of 8 rows x 32 pixels x 32 (or 16) output channels"]
         direction TB
-        P0["Prefetch input chunk 0 into registers<br/>(16 channels, tile + 1-pixel halo, zero outside the image,<br/>nearest upsampling of the first source, concatenated second source)"]
+        P0["Prefetch input chunk 0 and its weights into registers<br/>(16 channels, tile + 1-pixel halo, zero outside the image,<br/>nearest upsampling of the first source, concatenated second source)"]
         B0["Load the bias into the accumulators"]
-        S0["Store chunk 0 into shared memory buffer 0, barrier"]
+        S0["Store chunk 0 and its weights into shared memory, barrier"]
         P0 --> B0 --> S0 --> LOOP
 
         subgraph LOOP ["For each chunk of 16 input channels"]
             direction TB
-            PF["Prefetch the next chunk into registers"]
-            TAPS["For each of the 9 taps:<br/>load weight tiles (global, 16x16)<br/>load pixel tiles from shared memory (16x16)<br/>MMA into 2 rows x MX columns x NF channel blocks"]
-            ST["Store the next chunk into the other shared memory buffer<br/>one barrier per chunk"]
+            PF["Prefetch the next chunk and its weights into registers"]
+            TAPS["For each of the 9 taps:<br/>load weight tiles from shared memory (16x16)<br/>load pixel tiles from shared memory (16x16)<br/>MMA into 2 rows x 2 columns x NF channel blocks"]
+            ST["Store the next chunk into the other input buffer, barrier<br/>store the next weights (single buffer), barrier"]
             PF --> TAPS --> ST
         end
 
@@ -199,7 +199,13 @@ flowchart TD
 Design points:
 
 - **Double buffering**: the global loads of the next input chunk overlap the matrix
-  multiplications of the current one, with a single barrier per chunk.
+  multiplications of the current one.
+- **Weights staged in shared memory**: the weights of a chunk are loaded once per workgroup with
+  coalesced loads and read from shared memory, instead of being loaded by each subgroup with
+  cooperative matrix loads from global memory, which were the main cost of the kernel. With the
+  48 KB of shared memory available to a Vulkan workgroup, they fit only single-buffered next to
+  the double-buffered 32x8 input tiles, hence a second barrier per chunk. This made the
+  convolutions 1.2-2x faster (1080p high quality: 6.72 → 5.01 ms).
 - **Pooling fusion**: each subgroup owns two consecutive output rows, which are exactly the rows
   of the 2x2 pooling windows, so pooling needs no exchange between subgroups.
 - **Upsampling and concatenation fusion**: the concatenation is done while loading the input
@@ -209,9 +215,8 @@ Design points:
   low-resolution tensor (one per output phase) with combined weights, which needs 56% fewer
   multiply-adds. Each subgroup computes one phase, so each combined weight tile is reused by
   4 matrix fragments (section below).
-- **Per-layer tile selection**: 32x8 pixels x 32 channels by default, 48 pixels wide for layers
-  with more than 64 input channels (more reuse of the weights), and 16 channels per workgroup for
-  layers with an odd number of 16-channel blocks or too few workgroups to fill the GPU.
+- **Tile selection**: 32x8 pixels x 32 channels, or 16 channels per workgroup for layers with an
+  odd number of 16-channel blocks (no wasted work).
 - **Fallback**: GPUs without cooperative matrices (and non-NVIDIA GPUs by default) use a plain
   FMA kernel with the same tiling of the input.
 
