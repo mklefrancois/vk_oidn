@@ -3,6 +3,9 @@ name: Build
 # Builds vk_oidn on Windows and Linux with the Vulkan SDK (which provides slangc).
 # On Linux, the denoiser is also validated on lavapipe (Mesa's CPU Vulkan driver) against the
 # official Open Image Denoise CPU device, with the Khronos validation layer enabled.
+# Each build creates the SDK package (headers, prebuilt static libraries, CMake package files)
+# and checks that an application can link it. For version tags (v*), the packages are attached
+# to the GitHub release of the tag.
 
 on:
   push:
@@ -24,9 +27,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          # Visual Studio 2022: MSVC libraries can be linked by the same or newer toolsets only
+          - os: windows-2022
             platform: windows-x64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             platform: linux-x64
 
     runs-on: ${{ matrix.os }}
@@ -125,3 +129,100 @@ jobs:
           bash tests/scripts/run_validation.sh "$IMG"
           echo "== Storage image views =="
           bash tests/scripts/run_validation.sh "$IMG" --images
+
+      # SDK package: Release (and Debug on Windows) libraries with the CMake package files
+      - name: Build Debug (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --config Debug --parallel --target vk_oidn
+
+      - name: Create SDK package
+        id: package
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="dev-$(git rev-parse --short HEAD)"
+          fi
+          name="vk_oidn-${version}-${{ matrix.platform }}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          configs="Release"
+          if [ "$RUNNER_OS" = "Windows" ]; then configs="Release Debug"; fi
+          for config in $configs; do
+            cmake --install build --config "$config" --prefix "staging/${name}"
+          done
+          find "staging/${name}" -type f | sort
+
+      # Builds a small application against the package, in the configurations users build
+      - name: Test SDK package
+        shell: bash
+        run: |
+          sdk="$PWD/staging/${{ steps.package.outputs.name }}/lib/cmake/vk_oidn"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -S tests/package -B build_package_test -A x64 "-Dvk_oidn_DIR=$sdk"
+            for config in Debug Release RelWithDebInfo; do
+              cmake --build build_package_test --config "$config"
+              "build_package_test/$config/vk_oidn_package_test.exe"
+            done
+          else
+            for config in Release Debug; do
+              cmake -S tests/package -B "build_package_test_$config" -G Ninja -DCMAKE_BUILD_TYPE="$config" "-Dvk_oidn_DIR=$sdk"
+              cmake --build "build_package_test_$config"
+              "build_package_test_$config/vk_oidn_package_test"
+            done
+          fi
+
+      - name: Archive SDK package
+        shell: bash
+        run: |
+          name="${{ steps.package.outputs.name }}"
+          mkdir dist
+          cd staging
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            archive="${name}.zip"
+            7z a -tzip "../dist/${archive}" "${name}" > /dev/null
+          else
+            archive="${name}.tar.gz"
+            tar -czf "../dist/${archive}" "${name}"
+          fi
+          cd ../dist
+          sha256sum "${archive}" > "${archive}.sha256"
+          cat "${archive}.sha256"
+          ls -l
+
+      - name: Upload SDK package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: dist
+          if-no-files-found: error
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 90 || 7 }}
+
+  # Attaches the SDK packages to the GitHub release of a version tag (creates the release if needed)
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download SDK packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          cat *.sha256 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            gh release create "$tag" --verify-tag --title "vk_oidn ${tag#v}" --generate-notes
+          fi
+          gh release upload "$tag" *.zip *.tar.gz SHA256SUMS.txt --clobber

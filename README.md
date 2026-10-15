@@ -16,14 +16,10 @@ never submits work or waits on the host.
 [validation and performance](docs/validation_and_performance.md) (all measurements and how they
 were made, issues found, experiments).
 
-> **Status: work in progress.** This repository is being built step by step:
->
-> 1. [x] Repository skeleton, license, draft API (`include/vk_oidn/vk_oidn.h`)
-> 2. [ ] Weight packer (`tools/`): OIDN `.tza` weights → GPU-ready blobs
-> 3. [x] Slang shaders (`shaders/vk_oidn.slang`), validated in the OIDN fork
-> 4. [x] API implementation (`src/`), inputs/outputs as buffers or storage image views
-> 5. [ ] Validation against Open Image Denoise and benchmarks (`tests/`)
-> 6. [ ] Samples (vk_mini_samples, vk_gltf_renderer)
+**Status:** version 0.x: the API may still change between minor versions. Releases with the
+prebuilt SDK packages are on the [releases page](https://github.com/mklefrancois/vk_oidn/releases).
+Example: the `oidn_denoiser` sample of vk_mini_samples (path-traced Cornell box, denoiser with
+albedo and normal guides).
 
 The reference implementation is the Vulkan backend of the Open Image Denoise fork in
 [mklefrancois/oidn-vulkan](https://github.com/mklefrancois/oidn-vulkan) (branch `vulkan`), which
@@ -93,6 +89,38 @@ GPU time on an NVIDIA RTX PRO 4500 Blackwell (hdr + albedo + normal):
 | 3840x2160  | high    | 27.83 ms  | 34.65 ms        |
 | 3840x2160  | fast    | 14.63 ms  | 23.41 ms        |
 
+## Adding vk_oidn to a project
+
+**Prebuilt SDK package** (recommended): each [release](https://github.com/mklefrancois/vk_oidn/releases)
+has a package per platform with the header, the static libraries (kernels and weights embedded)
+and the CMake package files. Nothing of vk_oidn is compiled; only the Vulkan headers are needed.
+
+| Package                                 | Contents                                                   |
+|-----------------------------------------|------------------------------------------------------------|
+| `vk_oidn-<version>-windows-x64.zip`     | `vk_oidn.lib` (Release) and `vk_oidnd.lib` (Debug), MSVC `/MD` runtime, Visual Studio 2022 or newer |
+| `vk_oidn-<version>-linux-x64.tar.gz`    | `libvk_oidn.a` (Release, position independent), GCC 13 (Ubuntu 24.04) |
+
+```cmake
+include(FetchContent)
+if(WIN32)
+  set(VK_OIDN_PACKAGE vk_oidn-0.1.1-windows-x64.zip)
+else()
+  set(VK_OIDN_PACKAGE vk_oidn-0.1.1-linux-x64.tar.gz)
+endif()
+FetchContent_Declare(vk_oidn_sdk
+  URL https://github.com/mklefrancois/vk_oidn/releases/download/v0.1.1/${VK_OIDN_PACKAGE})
+FetchContent_MakeAvailable(vk_oidn_sdk)
+find_package(vk_oidn 0.1 CONFIG REQUIRED PATHS ${vk_oidn_sdk_SOURCE_DIR} NO_DEFAULT_PATH)
+target_link_libraries(my_app PRIVATE vk_oidn::vk_oidn)
+```
+
+Applications built as RelWithDebInfo or MinSizeRel use the Release library. The checksums of the
+packages are in `SHA256SUMS.txt` of each release (use them with `URL_HASH SHA256=...`).
+
+**From the sources**: `FetchContent_Declare(vk_oidn GIT_REPOSITORY https://github.com/mklefrancois/vk_oidn.git GIT_TAG v0.1.1)`
+and `FetchContent_MakeAvailable(vk_oidn)` give the same `vk_oidn::vk_oidn` target, built with the
+application (requires Python 3 and `slangc`, see below).
+
 ## Building
 
 [![Build](https://github.com/mklefrancois/vk_oidn/actions/workflows/build.yml/badge.svg)](https://github.com/mklefrancois/vk_oidn/actions/workflows/build.yml)
@@ -104,6 +132,7 @@ Slang 2026.17). On Linux, the Vulkan loader library is also needed (`libvulkan-d
 ```
 cmake -S . -B build
 cmake --build build --config Release
+cmake --install build --config Release --prefix <sdk folder>   # creates the SDK package
 ```
 
 The `slangc` of some Linux distribution packages is too old for the kernels: CMake then stops
@@ -114,7 +143,10 @@ Every push is built on Windows and Linux by [GitHub Actions](.github/workflows/b
 warnings as errors. On Linux, the denoiser is also run on lavapipe (Mesa's CPU Vulkan driver) in
 11 configurations, with buffers and with image views, and compared to the official Open Image
 Denoise CPU device, with the Khronos validation layer enabled (see
-[docs/validation_and_performance.md](docs/validation_and_performance.md)).
+[docs/validation_and_performance.md](docs/validation_and_performance.md)). Each build also creates
+the SDK packages and links a small application against them
+([tests/package](tests/package)); for a version tag `v*`, the packages are attached to the
+release.
 
 ## Shaders
 

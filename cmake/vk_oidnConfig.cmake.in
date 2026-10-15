@@ -1,0 +1,25 @@
+# Copyright 2026 NVIDIA Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+# CMake package configuration of the vk_oidn SDK.
+# Usage: find_package(vk_oidn CONFIG REQUIRED) and target_link_libraries(app PRIVATE vk_oidn::vk_oidn)
+#
+# vk_oidn::vk_oidn is a static library containing the compiled kernels and the network weights.
+# It does not link the Vulkan loader (the application provides vkGet*ProcAddr); only the Vulkan
+# headers are needed (Vulkan::Headers, from the Vulkan SDK).
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+if(NOT TARGET Vulkan::Headers)
+  find_dependency(Vulkan)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/vk_oidnTargets.cmake")
+
+# The package has Release and Debug libraries. Other configurations use the Release library, which
+# has the same C++ runtime (with MSVC, the Debug library uses the debug runtime and cannot be mixed).
+set_property(TARGET vk_oidn::vk_oidn PROPERTY MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
+set_property(TARGET vk_oidn::vk_oidn PROPERTY MAP_IMPORTED_CONFIG_MINSIZEREL Release)
+
+check_required_components(vk_oidn)

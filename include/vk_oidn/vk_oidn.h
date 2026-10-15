@@ -28,6 +28,11 @@
 #include <memory>
 #include <vector>
 
+// Version of vk_oidn (must match the project version in CMakeLists.txt)
+#define VK_OIDN_VERSION_MAJOR 0
+#define VK_OIDN_VERSION_MINOR 1
+#define VK_OIDN_VERSION_PATCH 1
+
 namespace vkoidn {
 
   enum class Result

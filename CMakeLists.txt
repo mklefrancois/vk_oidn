@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.21)
-project(vk_oidn VERSION 0.1.0 LANGUAGES CXX)
+project(vk_oidn VERSION 0.1.1 LANGUAGES CXX)
 
 option(VK_OIDN_EMBED_WEIGHTS "Embed the packed weights from the weights folder in the library" ON)
 option(VK_OIDN_BUILD_TESTS "Build the vk_oidn tests" ${PROJECT_IS_TOP_LEVEL})
+option(VK_OIDN_INSTALL "Generate the install rules (SDK package)" ${PROJECT_IS_TOP_LEVEL})
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,10 +49,20 @@ add_library(vk_oidn STATIC
 )
 add_library(vk_oidn::vk_oidn ALIAS vk_oidn)
 
-target_include_directories(vk_oidn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(vk_oidn PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>)
 target_include_directories(vk_oidn PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(vk_oidn PUBLIC Vulkan::Headers)
 target_compile_definitions(vk_oidn PRIVATE VK_NO_PROTOTYPES) # functions are loaded at runtime
+# Debug library named vk_oidnd so both configurations can be installed side by side; PIC so the
+# static library can be linked into shared libraries
+set_target_properties(vk_oidn PROPERTIES DEBUG_POSTFIX d POSITION_INDEPENDENT_CODE ON)
+
+# The version in the header must match the project version
+file(STRINGS include/vk_oidn/vk_oidn.h version_lines REGEX "#define VK_OIDN_VERSION_(MAJOR|MINOR|PATCH) ")
+string(REGEX REPLACE "[^;]*MAJOR ([0-9]+)[^;]*;[^;]*MINOR ([0-9]+)[^;]*;[^;]*PATCH ([0-9]+).*" "\\1.\\2.\\3" header_version "${version_lines}")
+if(NOT header_version VERSION_EQUAL PROJECT_VERSION)
+  message(FATAL_ERROR "vk_oidn: version ${header_version} in vk_oidn.h does not match the project version ${PROJECT_VERSION}")
+endif()
 if(MSVC)
   target_compile_definitions(vk_oidn PRIVATE _CRT_SECURE_NO_WARNINGS) # getenv() for the debug variables
 endif()
@@ -185,4 +196,22 @@ if(VK_OIDN_BUILD_TESTS)
 
   add_executable(vk_oidn_denoise_test tests/denoise_test.cpp)
   target_link_libraries(vk_oidn_denoise_test PRIVATE vk_oidn Vulkan::Vulkan)
+endif()
+
+# Install rules: the SDK package (headers, static libraries with the embedded kernels and weights,
+# CMake package configuration). Consumers use find_package(vk_oidn CONFIG) and vk_oidn::vk_oidn.
+if(VK_OIDN_INSTALL)
+  include(CMakePackageConfigHelpers)
+  set(config_dir lib/cmake/vk_oidn)
+  install(TARGETS vk_oidn EXPORT vk_oidnTargets ARCHIVE DESTINATION lib)
+  install(FILES include/vk_oidn/vk_oidn.h DESTINATION include/vk_oidn)
+  install(EXPORT vk_oidnTargets NAMESPACE vk_oidn:: DESTINATION ${config_dir})
+  configure_package_config_file(cmake/vk_oidnConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/vk_oidnConfig.cmake INSTALL_DESTINATION ${config_dir})
+  # 0.x versions may change the API in minor versions
+  write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/vk_oidnConfigVersion.cmake
+    COMPATIBILITY SameMinorVersion)
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/vk_oidnConfig.cmake
+                ${CMAKE_CURRENT_BINARY_DIR}/vk_oidnConfigVersion.cmake DESTINATION ${config_dir})
+  install(FILES LICENSE NOTICE README.md DESTINATION .)
 endif()
