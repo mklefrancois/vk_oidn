@@ -11,6 +11,14 @@ never submits work or waits on the host.
 - Inputs and outputs as buffers (device addresses) or storage image views.
 - Pre-packed network weights embedded in the library (no runtime file loading).
 
+![A path-traced room at 4 samples per pixel, the vk_oidn result from those 4 samples, and a 4096-sample reference](docs/images/denoise_comparison.jpg)
+
+*A room path traced in [vk_gltf_renderer](https://github.com/nvpro-samples/vk_gltf_renderer) at
+1280x720: 4 samples per pixel (left), denoised by vk_oidn in high quality with albedo and normal
+guides (middle), and a 4096-sample reference (right). Measured on this scene at 1000x800, the
+denoised image gets within 1% error of the converged image at about 50 samples per pixel, where
+the path tracer alone needs about 3,200.*
+
 **Documentation:**
 [architecture](docs/architecture.md) (how it works, with diagrams) ·
 [validation and performance](docs/validation_and_performance.md) (all measurements and how they
@@ -26,6 +34,15 @@ The reference implementation is the Vulkan backend of the Open Image Denoise for
 is used to validate the output of this library.
 
 ## Usage
+
+The denoiser takes the noisy color (HDR or LDR) and, optionally, two guide images of the first
+visible surface: its albedo and its normal. They help the network keep textures and geometric
+edges sharp.
+
+![The noisy color at 1 sample per pixel, the albedo and normal guides, and the vk_oidn output](docs/images/denoise_inputs.jpg)
+
+*The `oidn_denoiser` sample of [vk_mini_samples](https://github.com/nvpro-samples/vk_mini_samples):
+color at 1 sample per pixel, albedo, normal (as 0.5 + 0.5 n), and the denoised output.*
 
 ```cpp
 #include <vk_oidn/vk_oidn.h>
@@ -81,6 +98,11 @@ OIDN's CUDA backend), and is bit-identical to the Vulkan backend of the OIDN for
 sub-pixel optimization is disabled. The validation layer reports no errors.
 
 GPU time on an NVIDIA RTX PRO 4500 Blackwell (hdr + albedo + normal):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/perf_dark.png">
+  <img alt="GPU time per image: vk_oidn is 1.5 to 1.9 times faster than Open Image Denoise's CUDA backend at 1920x1080 and 3840x2160" src="docs/images/perf_light.png">
+</picture>
 
 | Resolution | Quality | vk_oidn   | OIDN 2.5.1 CUDA |
 |------------|---------|-----------|-----------------|
