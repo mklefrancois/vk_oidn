@@ -1,0 +1,75 @@
+#version 460
+// Copyright 2026 NVIDIA Corporation
+// SPDX-License-Identifier: Apache-2.0
+
+// Peak cooperative matrix throughput: register-only multiply-add chains (no memory traffic).
+// Defines: TYPE_F16 / TYPE_FP8 / TYPE_INT8, ACC_F16 / ACC_F32 / ACC_I32, NACC (independent chains)
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_control_flow_attributes : require
+#ifdef TYPE_FP8
+#extension GL_EXT_float_e4m3 : require
+#endif
+
+layout(local_size_x = 128) in;
+layout(push_constant) uniform PC { uint64_t buf[4]; int ints[8]; } pc;
+layout(buffer_reference, std430) buffer HalfBuf { float16_t d[]; };
+layout(buffer_reference, std430) buffer FloatBuf { float d[]; };
+layout(buffer_reference, std430) buffer IntBuf { int d[]; };
+
+#if defined(TYPE_FP8)
+  #define AT floate4m3_t
+  #define KK 32
+#elif defined(TYPE_INT8)
+  #define AT int8_t
+  #define KK 32
+#else
+  #define AT float16_t
+  #define KK 16
+#endif
+
+#if defined(ACC_F32)
+  #define CT float
+#elif defined(ACC_I32)
+  #define CT int
+#else
+  #define CT float16_t
+#endif
+
+#ifndef NACC
+#define NACC 8
+#endif
+
+void main()
+{
+  const int iters = pc.ints[0];
+  coopmat<float16_t, gl_ScopeSubgroup, 16, KK, gl_MatrixUseA> a16;
+  coopmat<float16_t, gl_ScopeSubgroup, KK, 16, gl_MatrixUseB> b16;
+  coopMatLoad(a16, HalfBuf(pc.buf[0]).d, 0, KK, gl_CooperativeMatrixLayoutRowMajor);
+  coopMatLoad(b16, HalfBuf(pc.buf[0]).d, 512, 16, gl_CooperativeMatrixLayoutRowMajor);
+  coopmat<AT, gl_ScopeSubgroup, 16, KK, gl_MatrixUseA> a = coopmat<AT, gl_ScopeSubgroup, 16, KK, gl_MatrixUseA>(a16);
+  coopmat<AT, gl_ScopeSubgroup, KK, 16, gl_MatrixUseB> b = coopmat<AT, gl_ScopeSubgroup, KK, 16, gl_MatrixUseB>(b16);
+
+  coopmat<CT, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> c[NACC];
+  for (int j = 0; j < NACC; ++j)
+    c[j] = coopmat<CT, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(CT(0));
+
+  for (int i = 0; i < iters; ++i)
+  {
+    [[unroll]] for (int j = 0; j < NACC; ++j)
+      c[j] = coopMatMulAdd(a, b, c[j]);
+  }
+
+  for (int j = 1; j < NACC; ++j)
+    c[0] = c[0] + c[j];
+  const uint sg = gl_WorkGroupID.x * 4 + gl_LocalInvocationIndex / 32;
+#if defined(ACC_F32)
+  coopMatStore(c[0], FloatBuf(pc.buf[1]).d, (sg % 1024) * 256, 16, gl_CooperativeMatrixLayoutRowMajor);
+#elif defined(ACC_I32)
+  coopMatStore(c[0], IntBuf(pc.buf[1]).d, (sg % 1024) * 256, 16, gl_CooperativeMatrixLayoutRowMajor);
+#else
+  coopMatStore(c[0], HalfBuf(pc.buf[1]).d, (sg % 1024) * 256, 16, gl_CooperativeMatrixLayoutRowMajor);
+#endif
+}

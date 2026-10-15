@@ -1,0 +1,80 @@
+#version 460
+// Copyright 2026 NVIDIA Corporation
+// SPDX-License-Identifier: Apache-2.0
+
+// 3x3 convolution with cooperative vectors (VK_NV_cooperative_vector), FP16, one invocation per
+// output pixel. Input: HWC f16 tensor zero-padded to (W+2) x (H+2) pixels; output: HWC f16.
+//   TAPS (default): 9 matrix-vector products of COUT x CIN per pixel
+//   ROWS: the 3 horizontally adjacent input pixels are contiguous in memory (3 * CIN halfs), so each
+//         kernel row is one product of COUT x KROW (KROW = 3 * CIN)
+// Variants isolating the costs:
+//   NO_LOAD:  input vectors computed instead of loaded (products only)
+//   MEM_ONLY: products replaced by the loaded vector (memory traffic only, CIN == COUT)
+// Push constants: buf0 = padded input, buf1 = weights (inferencing-optimal, see bench
+// --coopvec-matrix), buf2 = output, buf3 = bias; ints[0] = W, ints[1] = H, ints[2] = weight stride
+#extension GL_NV_cooperative_vector : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_KHR_memory_scope_semantics : require
+
+layout(local_size_x = 32, local_size_y = 4) in;
+layout(push_constant) uniform PC { uint64_t buf[4]; int ints[8]; } pc;
+layout(buffer_reference, std430) buffer HalfBuf { float16_t d[]; };
+
+#ifndef CIN
+#define CIN 64
+#endif
+#ifndef COUT
+#define COUT 64
+#endif
+#ifndef KROW
+#define KROW 192
+#endif
+
+#ifdef ROWS
+#define NPROD 3
+#define KPROD KROW
+#else
+#define NPROD 9
+#define KPROD CIN
+#endif
+
+void main()
+{
+  const int W = pc.ints[0];
+  const uint mstride = uint(pc.ints[2]);
+  const int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y); // W, H multiples of 32, 4
+  const int PW = W + 2;
+
+  coopvecNV<float16_t, COUT> acc;
+  [[unroll]] for (int i = 0; i < NPROD; ++i)
+  {
+#ifdef ROWS
+    const uint inOffset = uint(((y + i) * PW + x) * CIN * 2);
+#else
+    const uint inOffset = uint(((y + i / 3) * PW + x + i % 3) * CIN * 2);
+#endif
+    coopvecNV<float16_t, KPROD> v;
+#ifdef NO_LOAD
+    v = coopvecNV<float16_t, KPROD>(float16_t(i) * float16_t(0.01) + float16_t(x & 7));
+#else
+    coopVecLoadNV(v, HalfBuf(pc.buf[0]).d, inOffset);
+#endif
+    coopvecNV<float16_t, COUT> r;
+#ifdef MEM_ONLY
+    r = v;
+#else
+    if (i == 0)
+      coopVecMatMulAddNV(r, v, gl_ComponentTypeFloat16NV, HalfBuf(pc.buf[1]).d, 0, gl_ComponentTypeFloat16NV,
+                         HalfBuf(pc.buf[3]).d, 0, gl_ComponentTypeFloat16NV, COUT, KPROD,
+                         gl_CooperativeVectorMatrixLayoutInferencingOptimalNV, false, 0);
+    else
+      coopVecMatMulNV(r, v, gl_ComponentTypeFloat16NV, HalfBuf(pc.buf[1]).d, uint(i) * mstride, gl_ComponentTypeFloat16NV,
+                      COUT, KPROD, gl_CooperativeVectorMatrixLayoutInferencingOptimalNV, false, 0);
+#endif
+    acc = (i == 0) ? r : acc + r;
+  }
+  acc = max(acc, coopvecNV<float16_t, COUT>(float16_t(0)));
+  coopVecStoreNV(acc, HalfBuf(pc.buf[2]).d, uint((y * W + x) * COUT * 2));
+}

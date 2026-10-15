@@ -1,0 +1,34 @@
+#version 460
+// Copyright 2026 NVIDIA Corporation
+// SPDX-License-Identifier: Apache-2.0
+
+// Peak cooperative vector throughput: each invocation repeatedly multiplies a vector by an N x N
+// matrix (inferencing-optimal layout), feeding the result back (MLP-like chain).
+// buf0 = input vectors, buf1 = matrix, buf2 = output; ints[0] = iterations, ints[1] = matrix stride
+#extension GL_NV_cooperative_vector : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_KHR_memory_scope_semantics : require
+
+layout(local_size_x = 64) in;
+layout(push_constant) uniform PC { uint64_t buf[4]; int ints[8]; } pc;
+layout(buffer_reference, std430) buffer HalfBuf { float16_t d[]; };
+
+#ifndef N
+#define N 64
+#endif
+
+void main()
+{
+  const uint id = gl_GlobalInvocationID.x;
+  coopvecNV<float16_t, N> v;
+  coopVecLoadNV(v, HalfBuf(pc.buf[0]).d, (id % 4096) * N * 2);
+  for (int i = 0; i < pc.ints[0]; ++i)
+  {
+    coopvecNV<float16_t, N> r;
+    coopVecMatMulNV(r, v, gl_ComponentTypeFloat16NV, HalfBuf(pc.buf[1]).d, 0, gl_ComponentTypeFloat16NV,
+                    N, N, gl_CooperativeVectorMatrixLayoutInferencingOptimalNV, false, 0);
+    v = r * float16_t(0.01);
+  }
+  coopVecStoreNV(v, HalfBuf(pc.buf[2]).d, (id % 4096) * N * 2);
+}

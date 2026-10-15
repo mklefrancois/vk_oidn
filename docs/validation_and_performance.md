@@ -344,7 +344,64 @@ phase (4 rows of the same parity) restores the reuse and gives the speedup above
 the upsampling layers, about 8% overall (1080p high: 7.29 → 6.72 ms, fast: 3.96 → 3.65 ms;
 4K high: 30.22 → 27.83 ms, fast: 16.03 → 14.63 ms).
 
+### Tensor core peak, and an experiment with cooperative vectors (`VK_NV_cooperative_vector`)
+
+How far are the kernels from the hardware limit, and could cooperative vectors, the newer
+SPIR-V matrix-vector instructions for neural shading, be faster? The micro-benchmarks in
+[`tests/microbench`](../tests/microbench) measure this on the RTX PRO 4500 Blackwell
+(driver 617.42, Vulkan SDK 1.4.363).
+
+**Tensor core peak** (`VK_KHR_cooperative_matrix`, register-only multiply-add chains, best of 1 to
+8 independent chains per subgroup):
+
+| Inputs → accumulator | Peak |
+|----------------------|------|
+| FP16 → FP16          | 203 TFLOPS |
+| FP16 → FP32          | 200 TFLOPS |
+| FP8 (E4M3) → FP16    | 399 TFLOPS |
+| FP8 (E4M3) → FP32    | 394 TFLOPS |
+| INT8 → INT32         | 454 TOPS |
+
+The high quality network does 565 GFLOP per 1920x1088 frame (with padded channels), so 6.36 ms is
+an average of 89 TFLOPS: **about 45% of the FP16 peak** (the largest layer reaches 98 TFLOPS,
+49%). The kernels are limited by data movement (loading the activation tiles and weight fragments
+of each multiply-add from shared and global memory), not by the tensor core math. Register use
+matters too: in the peak test, 6 or 8 independent FP16 chains per subgroup reach only about
+100 TFLOPS (fewer resident warps).
+
+**Cooperative vectors** (FP16, matrices converted to the inferencing-optimal layout with
+`vkCmdConvertCooperativeVectorMatrixNV`). The driver reports up to 1024 components, with FP16, INT8
+and FP8 matrices. Slang supports them (`CoopVec`, `coopVecMatMulAdd` with pointers), so writing
+SPIR-V by hand is not needed; the benchmark kernels use GLSL (`GL_NV_cooperative_vector`).
+
+| Test | Time | Throughput |
+|------|------|------------|
+| Matrix-vector chain 32x32 / 64x64 / 128x128 (input in registers) | - | 135 / 86 / 82 TFLOPS |
+| 3x3 convolution 64 → 64 channels, 1920x1088 (154 GFLOP), 9 products of 64x64 per pixel | 38.5 ms | 4.0 TFLOPS |
+| same, 3 products of 64x192 per pixel (3 adjacent input pixels are contiguous) | 42.8 ms | 3.6 TFLOPS |
+| same, input vectors computed instead of loaded (products only), 9 / 3 products | 1.18 / 0.94 ms | 131 / 165 TFLOPS |
+| same, products replaced by the loaded vectors (memory traffic only) | 1.71 ms | - |
+| vk_oidn FP16 kernel on comparable 64-channel layers (`dec_conv2b`, `dec_conv1b`) | ≈2.0 ms | 76-77 TFLOPS |
+
+The products alone and the memory traffic alone are both fast, but together the convolution is
+about 20 times slower than vk_oidn's kernel. Changing the workgroup shape, using a single matrix,
+removing the bias, not unrolling the taps, or adding arithmetic between the load and the product
+does not change it. The fast path of cooperative vectors seems to need inputs computed in
+registers, as in per-pixel MLPs (neural materials, texture decompression); a convolution, whose
+inputs are neighboring pixels in memory, does not fit it with this driver. Even in the
+products-only case, the throughput (131-165 TFLOPS) would leave little room over a better
+cooperative matrix kernel.
+
+**Conclusion:** cooperative vectors are not a way to speed up vk_oidn. The headroom is in data
+movement (up to about 2x to the FP16 peak) and in FP8 (2x the math peak and half the bytes moved).
+
 ## Ideas for further speedups
 
-- Larger K chunks (32 channels) and weights staged in shared memory in the KHR kernel.
-- FP8 or block-scaled formats on Blackwell (would need retraining or quantization analysis).
+- Less data movement per multiply-add in the FP16 kernels (the measured peak is about twice the
+  current average): larger register tiles per subgroup with FP16 accumulation (fewer registers),
+  larger K chunks (32 channels), weights staged in shared memory.
+- FP8 (E4M3) cooperative matrices: 2x the FP16 peak and half the bytes for weights and activations.
+  The FP16-trained weights would need a quantization accuracy analysis (per-channel scales), and
+  probably quantization-aware fine-tuning with the Open Image Denoise training scripts.
+- Smaller networks: for real-time use, a network designed for the budget (as DLSS is) does much
+  less work per pixel than the Open Image Denoise U-Net, which targets offline quality.
