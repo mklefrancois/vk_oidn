@@ -2,7 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.21)
-project(vk_oidn VERSION 0.1.1 LANGUAGES CXX)
+
+# MSVC debug information format selected with MSVC_DEBUG_INFORMATION_FORMAT (CMake 3.25+)
+if(POLICY CMP0141)
+  cmake_policy(SET CMP0141 NEW)
+endif()
+
+project(vk_oidn VERSION 0.1.2 LANGUAGES CXX)
 
 option(VK_OIDN_EMBED_WEIGHTS "Embed the packed weights from the weights folder in the library" ON)
 option(VK_OIDN_BUILD_TESTS "Build the vk_oidn tests" ${PROJECT_IS_TOP_LEVEL})
@@ -56,6 +62,10 @@ target_compile_definitions(vk_oidn PRIVATE VK_NO_PROTOTYPES) # functions are loa
 # Debug library named vk_oidnd so both configurations can be installed side by side; PIC so the
 # static library can be linked into shared libraries
 set_target_properties(vk_oidn PROPERTIES DEBUG_POSTFIX d POSITION_INDEPENDENT_CODE ON)
+# MSVC: debug information embedded in the objects of the static library (/Z7) instead of a separate
+# PDB, so the Debug library of the SDK package is self-contained (no LNK4099 warning, and the
+# debugger can step into vk_oidn)
+set_target_properties(vk_oidn PROPERTIES MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
 
 # The version in the header must match the project version
 file(STRINGS include/vk_oidn/vk_oidn.h version_lines REGEX "#define VK_OIDN_VERSION_(MAJOR|MINOR|PATCH) ")
