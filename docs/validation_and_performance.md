@@ -10,6 +10,7 @@ library works is described in [architecture.md](architecture.md).
 |--------------------|--------------------------------------------------------------------|
 | GPU                | NVIDIA RTX PRO 4500 Blackwell (Vulkan 1.4.351, driver 617.42)      |
 | Second GPU         | AMD Radeon integrated graphics (RDNA2, driver 26.8.1), used only for portability checks |
+| Laptop GPU         | NVIDIA RTX 3500 Ada Generation Laptop GPU (12 GB, 95 W max, driver 616.64), used only for performance (see [Laptop results](#laptop-results-rtx-3500-ada-generation)) |
 | OS / compiler      | Windows 11, MSVC 19.44 (Visual Studio 2022), Release builds        |
 | Vulkan SDK         | 1.4.363.0 (validation layer, glslang 16.6.0)                       |
 | Slang              | 2026.17 (from the Vulkan SDK)                                      |
@@ -200,6 +201,41 @@ decomposition).
 
 Memory (scratch + weights) for 1920x1080: 384 MB (base network), 518 MB (large network),
 256 MB (small network); 3840x2160 in 2 tiles: 799 MB.
+
+### Laptop results (RTX 3500 Ada Generation)
+
+Same method and models, on an NVIDIA RTX 3500 Ada Generation Laptop GPU (12 GB, 95 W maximum
+board power, driver 616.64, Vulkan 1.4.351), Core i7-13800H, Windows 11, on AC power with the
+Balanced power plan. Builds: vk_oidn with Visual Studio 2026 (MSVC 19.51), Slang 2026.17; the OIDN
+fork (commit `6c01cb6`, OIDN 2.5.1 code base) with its Vulkan and CUDA devices, built with Ninja,
+Visual Studio 2026 and CUDA 13.1 (`NVCC_APPEND_FLAGS=-allow-unsupported-compiler`, since CUDA 13.1
+does not yet accept this compiler version). The CUDA column is therefore the CUDA device of the
+fork, which is OIDN 2.5.1's CUDA device built from source, not the official binaries.
+
+Laptop clocks vary with temperature, so every configuration was run 3 times (each a full
+`oidnBenchmark` or `-n 50` run) and the table gives the **best** of the 3; the spread between runs
+is 2-10% at 720p/1080p and up to 20% at 4K (e.g. Slang 4K high: 89.3 / 106.6 / 107.2 ms).
+
+| Resolution | Quality | OIDN CUDA (fork) | OIDN fork, GLSL | OIDN fork, Slang | vk_oidn, no sub-pixel | **vk_oidn** |
+|------------|---------|------------------|-----------------|------------------|-----------------------|-------------|
+| 1280x720   | high    | 9.44 ms          | 8.92 ms         | 9.05 ms          | 9.17 ms               | **8.57 ms** |
+| 1920x1080  | high    | 23.45 ms         | 22.18 ms        | 21.47 ms         | 21.20 ms              | **19.95 ms** |
+| 3840x2160  | high    | 96.52 ms         | 95.00 ms        | 89.34 ms         | 85.57 ms              | **86.51 ms** |
+| 1280x720   | fast    | 6.45 ms          | 4.68 ms         | 5.26 ms          | 4.83 ms               | **4.45 ms** |
+| 1920x1080  | fast    | 14.33 ms         | 11.30 ms        | 11.63 ms         | 11.47 ms              | **10.64 ms** |
+| 3840x2160  | fast    | 63.06 ms         | 47.68 ms        | 49.69 ms         | 48.84 ms              | **43.64 ms** |
+
+vk_oidn is 1.1-1.2x (high) and 1.35-1.45x (fast) faster than the CUDA device on this GPU, a
+similar ratio to the Blackwell desktop GPU, which is about 3x faster in absolute terms. Other
+observations, compared to the desktop GPU:
+
+- The sub-pixel decomposition gains 6-8% at 720p/1080p in both qualities and 11% at 4K fast,
+  but nothing at 4K high quality (within the run-to-run spread).
+- The Slang kernels are faster than the GLSL kernels in high quality at 1080p and 4K (3-6%), as
+  on Blackwell, but 3-12% *slower* in fast quality (FP16 accumulation), where they were equal on
+  Blackwell. The `-O1` choice and the tile configuration were tuned on Blackwell and may not be
+  optimal on Ada.
+- Memory use is identical (385.6 MB at 1080p high, 800.6 MB at 4K high in 2 tiles).
 
 ### Per-layer times (vk_oidn, 1920x1088 tile, high quality)
 
