@@ -17,7 +17,7 @@ never submits work or waits on the host.
 were made, issues found, experiments).
 
 **Status:** version 0.x: the API may still change between minor versions. Releases with the
-prebuilt SDK packages are on the [releases page](https://github.com/mklefrancois/vk_oidn/releases).
+prebuilt SDK packages are on the [releases page](https://github.com/nvpro-samples/vk_oidn/releases).
 Example: the `oidn_denoiser` sample of vk_mini_samples (path-traced Cornell box, denoiser with
 albedo and normal guides).
 
@@ -91,7 +91,7 @@ GPU time on an NVIDIA RTX PRO 4500 Blackwell (hdr + albedo + normal):
 
 ## Adding vk_oidn to a project
 
-**Prebuilt SDK package** (recommended): each [release](https://github.com/mklefrancois/vk_oidn/releases)
+**Prebuilt SDK package** (recommended): each [release](https://github.com/nvpro-samples/vk_oidn/releases)
 has a package per platform with the header, the static libraries (kernels and weights embedded)
 and the CMake package files. Nothing of vk_oidn is compiled; only the Vulkan headers are needed.
 
@@ -103,12 +103,12 @@ and the CMake package files. Nothing of vk_oidn is compiled; only the Vulkan hea
 ```cmake
 include(FetchContent)
 if(WIN32)
-  set(VK_OIDN_PACKAGE vk_oidn-0.1.1-windows-x64.zip)
+  set(VK_OIDN_PACKAGE vk_oidn-0.1.3-windows-x64.zip)
 else()
-  set(VK_OIDN_PACKAGE vk_oidn-0.1.1-linux-x64.tar.gz)
+  set(VK_OIDN_PACKAGE vk_oidn-0.1.3-linux-x64.tar.gz)
 endif()
 FetchContent_Declare(vk_oidn_sdk
-  URL https://github.com/mklefrancois/vk_oidn/releases/download/v0.1.1/${VK_OIDN_PACKAGE})
+  URL https://github.com/nvpro-samples/vk_oidn/releases/download/v0.1.3/${VK_OIDN_PACKAGE})
 FetchContent_MakeAvailable(vk_oidn_sdk)
 find_package(vk_oidn 0.1 CONFIG REQUIRED PATHS ${vk_oidn_sdk_SOURCE_DIR} NO_DEFAULT_PATH)
 target_link_libraries(my_app PRIVATE vk_oidn::vk_oidn)
@@ -117,13 +117,13 @@ target_link_libraries(my_app PRIVATE vk_oidn::vk_oidn)
 Applications built as RelWithDebInfo or MinSizeRel use the Release library. The checksums of the
 packages are in `SHA256SUMS.txt` of each release (use them with `URL_HASH SHA256=...`).
 
-**From the sources**: `FetchContent_Declare(vk_oidn GIT_REPOSITORY https://github.com/mklefrancois/vk_oidn.git GIT_TAG v0.1.1)`
+**From the sources**: `FetchContent_Declare(vk_oidn GIT_REPOSITORY https://github.com/nvpro-samples/vk_oidn.git GIT_TAG v0.1.3)`
 and `FetchContent_MakeAvailable(vk_oidn)` give the same `vk_oidn::vk_oidn` target, built with the
 application (requires Python 3 and `slangc`, see below).
 
 ## Building
 
-[![Build](https://github.com/mklefrancois/vk_oidn/actions/workflows/build.yml/badge.svg)](https://github.com/mklefrancois/vk_oidn/actions/workflows/build.yml)
+[![Build](https://github.com/nvpro-samples/vk_oidn/actions/workflows/build.yml/badge.svg)](https://github.com/nvpro-samples/vk_oidn/actions/workflows/build.yml)
 
 Windows and Linux. Requires CMake 3.21+, a C++17 compiler, Python 3 and the
 [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) (headers and `slangc`; tested with 1.4.363.0,
