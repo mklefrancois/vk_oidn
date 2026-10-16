@@ -63,16 +63,16 @@ vkoidn::Context::create(contextInfo, context);
 vkoidn::DenoiserCreateInfo info;
 info.width = width;  info.height = height;
 info.hdr = true;     info.albedo = true;  info.normal = true;
-info.quality = vkoidn::Quality::High;
+info.quality = vkoidn::Quality::eHigh;
 std::unique_ptr<vkoidn::Denoiser> denoiser;
 vkoidn::Denoiser::create(*context, cmd, info, denoiser);
 
 // 4. Every frame: records the dispatches into the application's command buffer
 vkoidn::DenoiseInputs inputs;
-inputs.color  = {colorAddress,  vkoidn::Format::Float, 3, 16}; // e.g. RGBA32F, pixel stride 16
-inputs.albedo = {albedoAddress, vkoidn::Format::Float, 3, 16};
-inputs.normal = {normalAddress, vkoidn::Format::Float, 3, 16};
-inputs.output = {outputAddress, vkoidn::Format::Float, 3, 16};
+inputs.color  = {colorAddress,  vkoidn::Format::eFloat, 3, 16}; // e.g. RGBA32F, pixel stride 16
+inputs.albedo = {albedoAddress, vkoidn::Format::eFloat, 3, 16};
+inputs.normal = {normalAddress, vkoidn::Format::eFloat, 3, 16};
+inputs.output = {outputAddress, vkoidn::Format::eFloat, 3, 16};
 denoiser->cmdDenoise(cmd, inputs);
 // barrier: compute shader write -> your use of the output
 
@@ -125,21 +125,21 @@ and the CMake package files. Nothing of vk_oidn is compiled; only the Vulkan hea
 ```cmake
 include(FetchContent)
 if(WIN32)
-  set(VK_OIDN_PACKAGE vk_oidn-0.1.3-windows-x64.zip)
+  set(VK_OIDN_PACKAGE vk_oidn-0.2.0-windows-x64.zip)
 else()
-  set(VK_OIDN_PACKAGE vk_oidn-0.1.3-linux-x64.tar.gz)
+  set(VK_OIDN_PACKAGE vk_oidn-0.2.0-linux-x64.tar.gz)
 endif()
 FetchContent_Declare(vk_oidn_sdk
-  URL https://github.com/nvpro-samples/vk_oidn/releases/download/v0.1.3/${VK_OIDN_PACKAGE})
+  URL https://github.com/nvpro-samples/vk_oidn/releases/download/v0.2.0/${VK_OIDN_PACKAGE})
 FetchContent_MakeAvailable(vk_oidn_sdk)
-find_package(vk_oidn 0.1 CONFIG REQUIRED PATHS ${vk_oidn_sdk_SOURCE_DIR} NO_DEFAULT_PATH)
+find_package(vk_oidn 0.2 CONFIG REQUIRED PATHS ${vk_oidn_sdk_SOURCE_DIR} NO_DEFAULT_PATH)
 target_link_libraries(my_app PRIVATE vk_oidn::vk_oidn)
 ```
 
 Applications built as RelWithDebInfo or MinSizeRel use the Release library. The checksums of the
 packages are in `SHA256SUMS.txt` of each release (use them with `URL_HASH SHA256=...`).
 
-**From the sources**: `FetchContent_Declare(vk_oidn GIT_REPOSITORY https://github.com/nvpro-samples/vk_oidn.git GIT_TAG v0.1.3)`
+**From the sources**: `FetchContent_Declare(vk_oidn GIT_REPOSITORY https://github.com/nvpro-samples/vk_oidn.git GIT_TAG v0.2.0)`
 and `FetchContent_MakeAvailable(vk_oidn)` give the same `vk_oidn::vk_oidn` target, built with the
 application (requires Python 3 and `slangc`, see below).
 
@@ -211,6 +211,15 @@ The `weights/` folder contains the Open Image Denoise `RT` filter weights conver
 GPU-ready format by `tools/pack_weights.py` (layer graph + FP16 weight tiles in the layout of the
 convolution kernels). They are embedded in the library by default (`VK_OIDN_EMBED_WEIGHTS`,
 requires Python 3 at build time). See [weights/README.md](weights/README.md).
+
+## Changelog
+
+**0.2.0** (breaking API change): the enumerators have the `e` prefix of Vulkan-Hpp, so that they
+cannot collide with macros of other headers (X11 defines `Success`, which broke `Result::Success`
+in applications including GLFW or Xlib on Linux). Rename `Result::Success` to `Result::eSuccess`,
+`Result::Error*` to `Result::eError*`, `Quality::Fast/Balanced/High` to
+`Quality::eFast/eBalanced/eHigh` and `Format::Float/Half` to `Format::eFloat/eHalf`.
+`find_package(vk_oidn 0.2)` is required (0.1 packages are not compatible).
 
 ## License
 

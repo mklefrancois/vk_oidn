@@ -501,8 +501,8 @@ int main(int argc, char* argv[])
       else if (arg == "-q")
       {
         const std::string q = next();
-        createInfo.quality = (q == "fast" || q == "f") ? vkoidn::Quality::Fast :
-                             (q == "balanced" || q == "b") ? vkoidn::Quality::Balanced : vkoidn::Quality::High;
+        createInfo.quality = (q == "fast" || q == "f") ? vkoidn::Quality::eFast :
+                             (q == "balanced" || q == "b") ? vkoidn::Quality::eBalanced : vkoidn::Quality::eHigh;
       }
       else if (arg == "-t")          half = next() == "half";
       else if (arg == "--is")        inputScale = std::stof(next());
@@ -542,7 +542,7 @@ int main(int argc, char* argv[])
 
     std::unique_ptr<vkoidn::Context> context;
     vkoidn::Result result = vkoidn::Context::create(contextInfo, context);
-    if (result != vkoidn::Result::Success)
+    if (result != vkoidn::Result::eSuccess)
       throw std::runtime_error(std::string("context creation failed: ") + vkoidn::getResultString(result));
 
     printf("Device: %s, cooperative matrices: %s\n", context->getDeviceName(),
@@ -591,7 +591,7 @@ int main(int argc, char* argv[])
     VkCommandBuffer cmd = app.beginCommands();
     std::unique_ptr<vkoidn::Denoiser> denoiser;
     result = vkoidn::Denoiser::create(*context, cmd, createInfo, denoiser);
-    if (result != vkoidn::Result::Success)
+    if (result != vkoidn::Result::eSuccess)
       throw std::runtime_error(std::string("denoiser creation failed: ") + vkoidn::getResultString(result));
     for (size_t i = 0; i < inputs.size() + 1; ++i)
     {
@@ -619,7 +619,7 @@ int main(int argc, char* argv[])
     {
       vkoidn::BufferImage image;
       image.address = b.address;
-      image.format = half ? vkoidn::Format::Half : vkoidn::Format::Float;
+      image.format = half ? vkoidn::Format::eHalf : vkoidn::Format::eFloat;
       image.channels = 3;
       return image;
     };
@@ -647,7 +647,7 @@ int main(int argc, char* argv[])
     App::barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
     result = denoiser->cmdDenoise(cmd, denoiseInputs);
-    if (result != vkoidn::Result::Success)
+    if (result != vkoidn::Result::eSuccess)
       throw std::runtime_error(std::string("cmdDenoise failed: ") + vkoidn::getResultString(result));
     App::barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);

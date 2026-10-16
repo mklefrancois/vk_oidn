@@ -103,14 +103,14 @@ namespace vkoidn {
 
     ImageParams getImageParams(const BufferImage& image, uint32_t width)
     {
-      const uint32_t elementSize = (image.format == Format::Half) ? 2 : 4;
+      const uint32_t elementSize = (image.format == Format::eHalf) ? 2 : 4;
       const uint32_t pixelByteStride = image.pixelByteStride ? image.pixelByteStride : image.channels * elementSize;
       const uint32_t rowByteStride = image.rowByteStride ? image.rowByteStride : width * pixelByteStride;
 
       ImageParams params;
       params.ptr = image.address;
       params.hByteStride = rowByteStride;
-      params.fmt = pixelByteStride | (image.channels << 24) | (image.format == Format::Half ? (1u << 28) : 0u);
+      params.fmt = pixelByteStride | (image.channels << 24) | (image.format == Format::eHalf ? (1u << 28) : 0u);
       return params;
     }
 
@@ -122,7 +122,7 @@ namespace vkoidn {
 
     bool isValidImage(const BufferImage& image)
     {
-      const uint32_t elementSize = (image.format == Format::Half) ? 2 : 4;
+      const uint32_t elementSize = (image.format == Format::eHalf) ? 2 : 4;
       return image.address != 0 && image.channels >= 1 && image.channels <= 3 &&
              image.pixelByteStride < (1u << 24) &&
              (image.pixelByteStride == 0 || image.pixelByteStride >= image.channels * elementSize) &&
@@ -248,7 +248,7 @@ namespace vkoidn {
     denoiser.reset();
     auto impl = std::make_unique<DenoiserImpl>(static_cast<ContextImpl&>(context));
     const Result result = impl->init(cmd, createInfo);
-    if (result == Result::Success)
+    if (result == Result::eSuccess)
       denoiser = std::move(impl);
     return result;
   }
@@ -370,24 +370,24 @@ namespace vkoidn {
   Result DenoiserImpl::createPipelines(bool accF16)
   {
     Result result;
-    if ((result = ctx.getPipeline("input_process", {}, false, inputPipeline)) != Result::Success ||
-        (result = ctx.getPipeline("output_process", {}, false, outputPipeline)) != Result::Success)
+    if ((result = ctx.getPipeline("input_process", {}, false, inputPipeline)) != Result::eSuccess ||
+        (result = ctx.getPipeline("output_process", {}, false, outputPipeline)) != Result::eSuccess)
       return result;
 
     if (ctx.areImageViewsSupported())
     {
-      if ((result = ctx.getPipeline("input_process_image", {}, false, inputImagePipeline, true)) != Result::Success ||
-          (result = ctx.getPipeline("output_process_image", {}, false, outputImagePipeline, true)) != Result::Success ||
+      if ((result = ctx.getPipeline("input_process_image", {}, false, inputImagePipeline, true)) != Result::eSuccess ||
+          (result = ctx.getPipeline("output_process_image", {}, false, outputImagePipeline, true)) != Result::eSuccess ||
           (info.hdr &&
-           (result = ctx.getPipeline("autoexposure_downsample_image", {}, false, aeDownsampleImagePipeline, true)) != Result::Success))
+           (result = ctx.getPipeline("autoexposure_downsample_image", {}, false, aeDownsampleImagePipeline, true)) != Result::eSuccess))
         return result;
     }
 
     if (info.hdr)
     {
-      if ((result = ctx.getPipeline("autoexposure_downsample", {}, false, aeDownsamplePipeline)) != Result::Success ||
-          (result = ctx.getPipeline("autoexposure_reduce", {}, false, aeReducePipeline)) != Result::Success ||
-          (result = ctx.getPipeline("autoexposure_reduce_final", {}, false, aeReduceFinalPipeline)) != Result::Success)
+      if ((result = ctx.getPipeline("autoexposure_downsample", {}, false, aeDownsamplePipeline)) != Result::eSuccess ||
+          (result = ctx.getPipeline("autoexposure_reduce", {}, false, aeReducePipeline)) != Result::eSuccess ||
+          (result = ctx.getPipeline("autoexposure_reduce_final", {}, false, aeReduceFinalPipeline)) != Result::eSuccess)
         return result;
     }
 
@@ -418,7 +418,7 @@ namespace vkoidn {
         layer.tileH = 1;
         layer.numFrags = BN / 16;
         if ((result = ctx.getPipeline("conv_cm2", {128, 0, 0, relu, uint32_t(BM), uint32_t(BN), uint32_t(BK)},
-                                      false, layer.pipeline)) != Result::Success)
+                                      false, layer.pipeline)) != Result::eSuccess)
           return result;
       }
       else if (ctx.isCooperativeMatrixEnabled() && upsample && !pool &&
@@ -433,7 +433,7 @@ namespace vkoidn {
         layer.numFrags = nf;
         const std::string name = "conv_coopmat_up_nf" + std::to_string(nf) + (accF16 ? "_f16acc" : "");
         const uint32_t workGroupSize = 4 * ctx.getSubgroupSize();
-        if ((result = ctx.getPipeline(name, {workGroupSize, upsample, pool, relu}, true, layer.pipeline)) != Result::Success)
+        if ((result = ctx.getPipeline(name, {workGroupSize, upsample, pool, relu}, true, layer.pipeline)) != Result::eSuccess)
           return result;
       }
       else if (ctx.isCooperativeMatrixEnabled())
@@ -456,7 +456,7 @@ namespace vkoidn {
         const std::string name = "conv_coopmat_mx" + std::to_string(mx) + "_nf" + std::to_string(nf) +
                                  (accF16 ? "_f16acc" : "");
         const uint32_t workGroupSize = 4 * ctx.getSubgroupSize();
-        if ((result = ctx.getPipeline(name, {workGroupSize, upsample, pool, relu}, true, layer.pipeline)) != Result::Success)
+        if ((result = ctx.getPipeline(name, {workGroupSize, upsample, pool, relu}, true, layer.pipeline)) != Result::eSuccess)
           return result;
       }
       else
@@ -464,12 +464,12 @@ namespace vkoidn {
         layer.tileW = 16;
         layer.tileH = 8;
         layer.numFrags = 1;
-        if ((result = ctx.getPipeline("conv_simple", {128, upsample, pool, relu}, false, layer.pipeline)) != Result::Success)
+        if ((result = ctx.getPipeline("conv_simple", {128, upsample, pool, relu}, false, layer.pipeline)) != Result::eSuccess)
           return result;
       }
     }
 
-    return Result::Success;
+    return Result::eSuccess;
   }
 
   Result DenoiserImpl::init(VkCommandBuffer cmd, const DenoiserCreateInfo& createInfo)
@@ -477,7 +477,7 @@ namespace vkoidn {
     info = createInfo;
     if (!cmd || info.width == 0 || info.height == 0 || info.width > 65536 || info.height > 65536 ||
         (info.normal && !info.albedo) || (info.hdr && info.srgb))
-      return Result::ErrorInvalidArgument;
+      return Result::eErrorInvalidArgument;
 
     // Select the weights (same rules as Open Image Denoise)
     const void* blob = info.weights;
@@ -493,9 +493,9 @@ namespace vkoidn {
         name += "_alb";
 
       std::vector<std::string> candidates;
-      if (info.quality == Quality::High)
+      if (info.quality == Quality::eHigh)
         candidates = {name + "_large", name};
-      else if (info.quality == Quality::Fast)
+      else if (info.quality == Quality::eFast)
         candidates = {name + "_small", name};
       else
         candidates = {name};
@@ -509,15 +509,15 @@ namespace vkoidn {
         }
       }
       if (!blob)
-        return Result::ErrorInvalidArgument; // model not embedded
+        return Result::eErrorInvalidArgument; // model not embedded
     }
 
     weightsBlob.assign(static_cast<const uint8_t*>(blob), static_cast<const uint8_t*>(blob) + blobByteSize);
     if (!parseWeights(weightsBlob.data(), weightsBlob.size(), weights))
-      return Result::ErrorInvalidArgument;
+      return Result::eErrorInvalidArgument;
     const uint32_t expectedInputChannels = 3 * (1 + (info.albedo ? 1 : 0) + (info.normal ? 1 : 0));
     if (weights.header->inputChannels != expectedInputChannels)
-      return Result::ErrorInvalidArgument;
+      return Result::eErrorInvalidArgument;
 
     // Transfer function (same as Open Image Denoise)
     transfer = info.srgb ? Transfer::Linear : (info.hdr ? Transfer::PU : Transfer::SRGB);
@@ -573,9 +573,9 @@ namespace vkoidn {
 
     // Pipelines
     // FP16 accumulation for the faster quality modes (like Open Image Denoise)
-    accF16 = ctx.isCooperativeMatrixEnabled() && ctx.hasCoopMatAccF16() && info.quality != Quality::High;
+    accF16 = ctx.isCooperativeMatrixEnabled() && ctx.hasCoopMatAccF16() && info.quality != Quality::eHigh;
     Result result = createPipelines(accF16);
-    if (result != Result::Success)
+    if (result != Result::eSuccess)
       return result;
 
     // Autoexposure (on the whole image)
@@ -586,14 +586,14 @@ namespace vkoidn {
       const int numBins = aeNumBinsH * aeNumBinsW;
       aeNumGroups = std::min(ceilDiv(numBins, autoexposureGroupSize), autoexposureGroupSize);
       aeByteSize = roundUp(size_t(numBins) * 4 + size_t(aeNumGroups) * 8, memoryAlignment) + memoryAlignment;
-      if ((result = ctx.createBuffer(aeByteSize, false, aeBuffer)) != Result::Success)
+      if ((result = ctx.createBuffer(aeByteSize, false, aeBuffer)) != Result::eSuccess)
         return result;
     }
 
     // Memory
-    if ((result = ctx.createBuffer(scratchByteSize, false, scratchBuffer)) != Result::Success ||
-        (result = ctx.createBuffer(weights.dataByteSize, false, weightBuffer)) != Result::Success ||
-        (result = ctx.createBuffer(weights.dataByteSize, true, stagingBuffer)) != Result::Success)
+    if ((result = ctx.createBuffer(scratchByteSize, false, scratchBuffer)) != Result::eSuccess ||
+        (result = ctx.createBuffer(weights.dataByteSize, false, weightBuffer)) != Result::eSuccess ||
+        (result = ctx.createBuffer(weights.dataByteSize, true, stagingBuffer)) != Result::eSuccess)
       return result;
 
     // Repack the weights of the layers using the sub-pixel or experimental coopmat2 kernels
@@ -680,8 +680,8 @@ namespace vkoidn {
 
       if (!extraData.empty())
       {
-        if ((result = ctx.createBuffer(extraData.size(), false, extraBuffer)) != Result::Success ||
-            (result = ctx.createBuffer(extraData.size(), true, extraStaging)) != Result::Success)
+        if ((result = ctx.createBuffer(extraData.size(), false, extraBuffer)) != Result::eSuccess ||
+            (result = ctx.createBuffer(extraData.size(), true, extraStaging)) != Result::eSuccess)
           return result;
         memcpy(extraStaging.mapped, extraData.data(), extraData.size());
         VkBufferCopy extraRegion{0, 0, extraData.size()};
@@ -723,7 +723,7 @@ namespace vkoidn {
     weightsBlob.shrink_to_fit();
     weights = Weights();
 
-    return Result::Success;
+    return Result::eSuccess;
   }
 
   void DenoiserImpl::cmdProfile(VkCommandBuffer cmd, uint32_t query)
@@ -789,7 +789,7 @@ namespace vkoidn {
   Result DenoiserImpl::cmdDenoise(VkCommandBuffer cmd, const DenoiseInputs& inputs)
   {
     if (!cmd)
-      return Result::ErrorInvalidArgument;
+      return Result::eErrorInvalidArgument;
 
     // Either image views or buffers must be used for all images
     const bool useViews = inputs.colorView.view != VK_NULL_HANDLE;
@@ -800,16 +800,16 @@ namespace vkoidn {
     if (useViews)
     {
       if (!ctx.areImageViewsSupported())
-        return Result::ErrorUnsupportedDevice;
+        return Result::eErrorUnsupportedDevice;
       if (!inputs.outputView.view ||
           info.albedo != (inputs.albedoView.view != VK_NULL_HANDLE) ||
           info.normal != (inputs.normalView.view != VK_NULL_HANDLE) ||
           inputs.color.address || inputs.albedo.address || inputs.normal.address || inputs.output.address)
-        return Result::ErrorInvalidArgument;
+        return Result::eErrorInvalidArgument;
 
       // Tiled denoising cannot be done in place
       if (getTileCount() > 1 && inputs.outputView.view == inputs.colorView.view)
-        return Result::ErrorInvalidArgument;
+        return Result::eErrorInvalidArgument;
 
       // Unused bindings are set to the color view to keep all descriptors valid
       viewArray[0] = inputs.colorView.view;
@@ -825,11 +825,11 @@ namespace vkoidn {
           info.albedo != (inputs.albedo.address != 0) || info.normal != (inputs.normal.address != 0) ||
           (info.albedo && !isValidImage(inputs.albedo)) || (info.normal && !isValidImage(inputs.normal)) ||
           inputs.albedoView.view || inputs.normalView.view || inputs.outputView.view)
-        return Result::ErrorInvalidArgument;
+        return Result::eErrorInvalidArgument;
 
       // Tiled denoising cannot be done in place
       if (getTileCount() > 1 && inputs.output.address == inputs.color.address)
-        return Result::ErrorInvalidArgument;
+        return Result::eErrorInvalidArgument;
 
       color  = getImageParams(inputs.color, info.width);
       albedo = info.albedo ? getImageParams(inputs.albedo, info.width) : ImageParams();
@@ -986,7 +986,7 @@ namespace vkoidn {
       }
     }
 
-    return Result::Success;
+    return Result::eSuccess;
   }
 
 } // namespace vkoidn

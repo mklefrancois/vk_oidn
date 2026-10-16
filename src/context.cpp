@@ -35,7 +35,7 @@ namespace vkoidn {
     context.reset();
     auto impl = std::make_unique<ContextImpl>();
     const Result result = impl->init(createInfo);
-    if (result == Result::Success)
+    if (result == Result::eSuccess)
       context = std::move(impl);
     return result;
   }
@@ -59,11 +59,11 @@ namespace vkoidn {
     if (!createInfo.instance || !createInfo.physicalDevice || !createInfo.device ||
         !createInfo.getInstanceProcAddr ||
         (createInfo.enabledExtensionCount > 0 && !createInfo.enabledExtensions))
-      return Result::ErrorInvalidArgument;
+      return Result::eErrorInvalidArgument;
 
     if (!fn.load(createInfo.instance, createInfo.device, createInfo.getInstanceProcAddr,
                  createInfo.getDeviceProcAddr))
-      return Result::ErrorUnsupportedDevice;
+      return Result::eErrorUnsupportedDevice;
 
     physicalDevice = createInfo.physicalDevice;
     pipelineCache = createInfo.pipelineCache;
@@ -73,7 +73,7 @@ namespace vkoidn {
     VkPhysicalDeviceProperties props;
     fn.vkGetPhysicalDeviceProperties(physicalDevice, &props);
     if (props.apiVersion < VK_API_VERSION_1_2 || props.limits.maxPushConstantsSize < maxParamsByteSize)
-      return Result::ErrorUnsupportedDevice;
+      return Result::eErrorUnsupportedDevice;
     deviceName = props.deviceName;
     timestampPeriod = props.limits.timestampPeriod;
     const bool isVulkan13 = props.apiVersion >= VK_API_VERSION_1_3;
@@ -144,7 +144,7 @@ namespace vkoidn {
     layoutInfo.pPushConstantRanges = &pushRange;
     device = createInfo.device;
     if (fn.vkCreatePipelineLayout(device, &layoutInfo, allocator, &pipelineLayout) != VK_SUCCESS)
-      return Result::ErrorVulkan;
+      return Result::eErrorVulkan;
 
     // Image views: storage images in a push descriptor set (color, albedo, normal, output)
     if (hasExtension(createInfo, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) && fn.vkCmdPushDescriptorSetKHR)
@@ -157,15 +157,15 @@ namespace vkoidn {
       setLayoutInfo.bindingCount = 4;
       setLayoutInfo.pBindings = bindings;
       if (fn.vkCreateDescriptorSetLayout(device, &setLayoutInfo, allocator, &imageSetLayout) != VK_SUCCESS)
-        return Result::ErrorVulkan;
+        return Result::eErrorVulkan;
 
       layoutInfo.setLayoutCount = 1;
       layoutInfo.pSetLayouts = &imageSetLayout;
       if (fn.vkCreatePipelineLayout(device, &layoutInfo, allocator, &imagePipelineLayout) != VK_SUCCESS)
-        return Result::ErrorVulkan;
+        return Result::eErrorVulkan;
     }
 
-    return Result::Success;
+    return Result::eSuccess;
   }
 
   int ContextImpl::findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags required,
@@ -188,14 +188,14 @@ namespace vkoidn {
     buffer = GpuBuffer();
     buffer.byteSize = byteSize;
     if (byteSize == 0)
-      return Result::Success;
+      return Result::eSuccess;
 
     VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bufferInfo.size = byteSize;
     bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     if (fn.vkCreateBuffer(device, &bufferInfo, allocator, &buffer.buffer) != VK_SUCCESS)
-      return Result::ErrorVulkan;
+      return Result::eErrorVulkan;
 
     VkMemoryRequirements memReqs;
     fn.vkGetBufferMemoryRequirements(device, buffer.buffer, &memReqs);
@@ -206,7 +206,7 @@ namespace vkoidn {
     if (memType < 0)
     {
       destroyBuffer(buffer);
-      return Result::ErrorOutOfMemory;
+      return Result::eErrorOutOfMemory;
     }
 
     VkMemoryAllocateFlagsInfo flagsInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
@@ -220,20 +220,20 @@ namespace vkoidn {
     {
       destroyBuffer(buffer);
       return (vr == VK_ERROR_OUT_OF_DEVICE_MEMORY || vr == VK_ERROR_OUT_OF_HOST_MEMORY)
-             ? Result::ErrorOutOfMemory : Result::ErrorVulkan;
+             ? Result::eErrorOutOfMemory : Result::eErrorVulkan;
     }
 
     if (fn.vkBindBufferMemory(device, buffer.buffer, buffer.memory, 0) != VK_SUCCESS ||
         (hostVisible && fn.vkMapMemory(device, buffer.memory, 0, VK_WHOLE_SIZE, 0, &buffer.mapped) != VK_SUCCESS))
     {
       destroyBuffer(buffer);
-      return Result::ErrorVulkan;
+      return Result::eErrorVulkan;
     }
 
     VkBufferDeviceAddressInfo addressInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
     addressInfo.buffer = buffer.buffer;
     buffer.address = fn.vkGetBufferDeviceAddress(device, &addressInfo);
-    return Result::Success;
+    return Result::eSuccess;
   }
 
   void ContextImpl::destroyBuffer(GpuBuffer& buffer)
@@ -253,7 +253,7 @@ namespace vkoidn {
                                   bool requireFullSubgroups, VkPipeline& pipeline, bool imageIO)
   {
     if (imageIO && !imagePipelineLayout)
-      return Result::ErrorUnsupportedDevice;
+      return Result::eErrorUnsupportedDevice;
 
     // Use the variant without float controls if the device does not support them
     const std::string moduleName = floatControls16 ? kernelName : kernelName + "_nofc";
@@ -267,7 +267,7 @@ namespace vkoidn {
     if (it != pipelines.end())
     {
       pipeline = it->second;
-      return Result::Success;
+      return Result::eSuccess;
     }
 
     size_t codeSize = 0;
@@ -293,7 +293,7 @@ namespace vkoidn {
       }
     }
     if (!code)
-      return Result::ErrorInvalidArgument;
+      return Result::eErrorInvalidArgument;
 
     // The embedded data is 256-byte aligned, which satisfies the alignment of pCode
     VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -301,7 +301,7 @@ namespace vkoidn {
     moduleInfo.pCode = static_cast<const uint32_t*>(code);
     VkShaderModule module;
     if (fn.vkCreateShaderModule(device, &moduleInfo, allocator, &module) != VK_SUCCESS)
-      return Result::ErrorVulkan;
+      return Result::eErrorVulkan;
 
     std::vector<VkSpecializationMapEntry> entries(specConstants.size());
     for (size_t i = 0; i < specConstants.size(); ++i)
@@ -329,10 +329,10 @@ namespace vkoidn {
     const VkResult vr = fn.vkCreateComputePipelines(device, pipelineCache, 1, &pipelineInfo, allocator, &pipeline);
     fn.vkDestroyShaderModule(device, module, allocator);
     if (vr != VK_SUCCESS)
-      return Result::ErrorVulkan;
+      return Result::eErrorVulkan;
 
     pipelines[key] = pipeline;
-    return Result::Success;
+    return Result::eSuccess;
   }
 
   void ContextImpl::cmdComputeBarrier(VkCommandBuffer cmd) const

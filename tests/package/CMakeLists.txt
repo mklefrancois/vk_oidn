@@ -12,7 +12,7 @@ project(vk_oidn_package_test LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(vk_oidn 0.1 CONFIG REQUIRED)
+find_package(vk_oidn 0.2 CONFIG REQUIRED)
 message(STATUS "Found vk_oidn ${vk_oidn_VERSION} in ${vk_oidn_DIR}")
 
 add_executable(vk_oidn_package_test main.cpp)

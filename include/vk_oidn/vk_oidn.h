@@ -30,18 +30,18 @@
 
 // Version of vk_oidn (must match the project version in CMakeLists.txt)
 #define VK_OIDN_VERSION_MAJOR 0
-#define VK_OIDN_VERSION_MINOR 1
-#define VK_OIDN_VERSION_PATCH 3
+#define VK_OIDN_VERSION_MINOR 2
+#define VK_OIDN_VERSION_PATCH 0
 
 namespace vkoidn {
 
   enum class Result
   {
-    Success,
-    ErrorUnsupportedDevice, // a required extension/feature is missing
-    ErrorInvalidArgument,
-    ErrorOutOfMemory,
-    ErrorVulkan,            // a Vulkan call failed
+    eSuccess,
+    eErrorUnsupportedDevice, // a required extension/feature is missing
+    eErrorInvalidArgument,
+    eErrorOutOfMemory,
+    eErrorVulkan,            // a Vulkan call failed
   };
 
   const char* getResultString(Result result);
@@ -110,9 +110,9 @@ namespace vkoidn {
 
   enum class Quality
   {
-    Fast,     // smallest network, FP16 accumulation
-    Balanced, // base network, FP16 accumulation
-    High,     // largest available network, FP32 accumulation
+    eFast,     // smallest network, FP16 accumulation
+    eBalanced, // base network, FP16 accumulation
+    eHigh,     // largest available network, FP32 accumulation
   };
 
   struct DenoiserCreateInfo
@@ -125,7 +125,7 @@ namespace vkoidn {
     bool albedo = false;   // albedo auxiliary input
     bool normal = false;   // normal auxiliary input (requires albedo)
     bool cleanAux = false; // auxiliary inputs are noise-free
-    Quality quality = Quality::High;
+    Quality quality = Quality::eHigh;
 
     // Maximum memory for intermediate data in MB; larger images are processed in tiles.
     // 0 = default (tiles of at most 2160x2160 pixels, like Open Image Denoise).
@@ -139,8 +139,8 @@ namespace vkoidn {
 
   enum class Format
   {
-    Float, // 32-bit float channels
-    Half,  // 16-bit float channels
+    eFloat, // 32-bit float channels
+    eHalf,  // 16-bit float channels
   };
 
   // Image stored in a buffer, specified by its device address
@@ -148,7 +148,7 @@ namespace vkoidn {
   struct BufferImage
   {
     VkDeviceAddress address = 0;
-    Format format = Format::Float;
+    Format format = Format::eFloat;
     uint32_t channels = 3;        // 1-3 channels are used (e.g. RGBA: channels = 3, pixel stride 16)
     uint32_t pixelByteStride = 0; // 0 = tightly packed
     uint32_t rowByteStride = 0;   // 0 = tightly packed

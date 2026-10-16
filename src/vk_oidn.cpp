@@ -10,12 +10,12 @@ namespace vkoidn {
   {
     switch (result)
     {
-    case Result::Success:                return "success";
-    case Result::ErrorUnsupportedDevice: return "unsupported device";
-    case Result::ErrorInvalidArgument:   return "invalid argument";
-    case Result::ErrorOutOfMemory:       return "out of memory";
-    case Result::ErrorVulkan:            return "Vulkan error";
-    default:                             return "unknown error";
+    case Result::eSuccess:                return "success";
+    case Result::eErrorUnsupportedDevice: return "unsupported device";
+    case Result::eErrorInvalidArgument:   return "invalid argument";
+    case Result::eErrorOutOfMemory:       return "out of memory";
+    case Result::eErrorVulkan:            return "Vulkan error";
+    default:                              return "unknown error";
     }
   }
 

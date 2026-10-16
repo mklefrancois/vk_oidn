@@ -15,6 +15,6 @@ int main()
   const bool linked = createContext && createDenoiser && getExtensions;
 
   printf("vk_oidn %d.%d.%d: %s\n", VK_OIDN_VERSION_MAJOR, VK_OIDN_VERSION_MINOR, VK_OIDN_VERSION_PATCH,
-         vkoidn::getResultString(vkoidn::Result::Success));
+         vkoidn::getResultString(vkoidn::Result::eSuccess));
   return linked ? 0 : 1;
 }

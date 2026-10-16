@@ -8,7 +8,7 @@ if(POLICY CMP0141)
   cmake_policy(SET CMP0141 NEW)
 endif()
 
-project(vk_oidn VERSION 0.1.3 LANGUAGES CXX)
+project(vk_oidn VERSION 0.2.0 LANGUAGES CXX)
 
 option(VK_OIDN_EMBED_WEIGHTS "Embed the packed weights from the weights folder in the library" ON)
 option(VK_OIDN_BUILD_TESTS "Build the vk_oidn tests" ${PROJECT_IS_TOP_LEVEL})
